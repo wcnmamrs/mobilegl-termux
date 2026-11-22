@@ -1,5 +1,16 @@
 # 变更记录
 
+## v1.0.2 之后的脚本修正（载荷未变，仍是 v1.0.2）
+
+`install.sh` 不在载荷里，所以只改安装器的修正不需要发新版；记录在此以免断档：
+
+- **Chromium 后端 `--use-angle=gl` → `--use-angle=gles`**：ANGLE 的桌面 GL 后端在 Linux 走 GLX，
+  画几何时结果不落进 canvas（`readPixels=0,0,0,255`，只有 clear 生效）；换成 GLES 后端后
+  get.webgl.org 的方块正常显示（`readPixels=0,255,0,255`）。
+- 容器内新增 `/usr/local/bin/legacy`：GL 1.x 程序（glxgears、老游戏）用 `legacy <命令>` 启动，
+  通过 LD_PRELOAD 把立即模式翻译成 VBO + 着色器（Magma 的 `glBegin` 是空 stub）。
+- README 改正"需要自行编译（约 20 分钟）"与"install.sh 会自动优先用本地 build"两处与事实不符的说法。
+
 版本号只描述**载荷**（预编译库 + 脚本 + 配置模板）的集合。`install.sh` 里钉死了载荷的
 sha256，所以脚本一改、载荷就变、版本号就必须跟着走 —— 否则老脚本会去下新载荷然后校验失败。
 

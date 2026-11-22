@@ -4,7 +4,7 @@
 容器内的 OpenGL 4.6 / GLES 调用经 `MobileGL` 的 split 传输送到 Termux 侧的常驻服务端，
 服务端用厂商 Vulkan 渲染，帧再经 **dma-buf 零拷贝**（DRI3+Present）送回 X 服务器。
 
-**装的时候不需要编译。** 预编译好的库随 [Releases](../../releases) 分发（arm64，单包约 8.7MB），
+**装的时候不需要编译。** 预编译好的库随 [Releases](https://github.com/wcnmamrs/mobilegl-termux/releases) 分发（arm64，单包约 8.7MB），
 `install.sh` 下载并三重校验后直接装进容器；只有想跟上游更新或改补丁的人，才需要按 `docs/GUIDE.md`
 自己编（那一趟是整夜的活，不是 20 分钟）。
 
