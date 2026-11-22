@@ -25,11 +25,11 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 REPO_OWNER="wcnmamrs"
 REPO_NAME="mobilegl-termux"
 PAYLOAD_FILE="mobilegl-payload-arm64-v${VERSION}.tar.xz"
-PAYLOAD_SHA256="480a520674145e555b63b003b0518d0fad9b1b9816448d260ef1d3216f04af5d"
+PAYLOAD_SHA256="99832feab114269d0004fb5a29bbb460a75f71e9513b8163e05ae1f23c374586"
 
 MGL_HOME="${MGL_HOME:-$HOME/mgl}"
 DEBIAN="${DEBIAN_NAME:-debian}"
@@ -60,16 +60,21 @@ _log() {
     printf '%s [%s] %s\n' "$(date '+%F %T')" "$1" "$2" >>"$LOG" 2>/dev/null || true
 }
 
-info() { printf '%s[i]%s %s\n' "$C_I" "$C_RST" "$*"; _log i "$*"; }
-ok()   { printf '%s[OK]%s %s\n' "$C_OK" "$C_RST" "$*"; _log OK "$*"; }
+# 所有界面消息一律走 stderr —— stdout 只留给"数据"（例如解包后的载荷目录），
+# 否则 $(unpack_payload ...) 会把提示文字一起吞进变量。
+info() { printf '%s[i]%s %s\n' "$C_I" "$C_RST" "$*" >&2; _log i "$*"; }
+ok()   { printf '%s[OK]%s %s\n' "$C_OK" "$C_RST" "$*" >&2; _log OK "$*"; }
 err()  { printf '%s[E]%s %s\n' "$C_E" "$C_RST" "$*" >&2; _log E "$*"; }
-dim()  { [ "$VERBOSE" = 1 ] && printf '%s    %s%s\n' "$C_DIM" "$*" "$C_RST" || true; }
-head1() { printf '\n%s== %s ==%s\n' "$C_B" "$*" "$C_RST"; _log = "$*"; }
+dim()  { [ "$VERBOSE" = 1 ] && printf '%s    %s%s\n' "$C_DIM" "$*" "$C_RST" >&2 || true; }
+head1() { printf '\n%s== %s ==%s\n' "$C_B" "$*" "$C_RST" >&2; _log = "$*"; }
 
 die() { local code="${2:-5}"; err "$1"; exit "$code"; }
 
+ERR_REPORTED=0
 on_err() {
     local line="$1"
+    [ "$ERR_REPORTED" = 1 ] && return 0
+    ERR_REPORTED=1
     err "在第 ${line} 行失败（命令退出码非 0）"
     err "日志：$LOG"
     if [ "$ACTION" = "install" ] && [ "${ROLLBACK_ON_FAIL:-0}" = "1" ]; then
@@ -91,12 +96,24 @@ sha_of() { sha256sum "$1" | awk '{print $1}'; }
 
 has_file() { [ -f "$1" ]; }
 
-free_mb() { df -Pm "$1" 2>/dev/null | awk 'NR==2{print $4}' | tr -d ' '; }
+free_mb() {  # Termux 的 df 是 toybox，只认 -Pk；统一按 KB 取再换算
+    local out
+    out=$(df -Pk "$1" 2>/dev/null | awk 'NR==2{print int($4/1024)}') || true
+    printf '%s' "${out:-0}"
+}
 
 # 在容器里执行；proot 的 stderr 提示会被过滤，但退出码保留。
 in_debian() {
     local script="$1" out rc=0
     out=$(proot-distro login "$DEBIAN" --shared-tmp -- /bin/bash -c "$script" 2>&1) || rc=$?
+    printf '%s\n' "$out" | grep -v '^proot warning' || true
+    return $rc
+}
+
+# 登录 shell 版：会读到 /etc/profile.d/mobilegl.sh —— 也正是用户日常"装完就能用"的路径
+in_debian_login() {
+    local script="$1" out rc=0
+    out=$(proot-distro login "$DEBIAN" --shared-tmp -- /bin/bash -lc "$script" 2>&1) || rc=$?
     printf '%s\n' "$out" | grep -v '^proot warning' || true
     return $rc
 }
@@ -289,6 +306,7 @@ install_termux_side() {
     for launcher in xfce.sh xfce-d.sh; do
         backup_once "$HOME/$launcher"
         ln -sfn "$MGL_HOME/$launcher" "$HOME/$launcher"
+        record "$HOME/$launcher"
         dim "$HOME/$launcher -> $MGL_HOME/$launcher"
     done
     ok "桌面启动器 ~/xfce.sh、~/xfce-d.sh 已指向本工具链"
@@ -297,6 +315,7 @@ install_termux_side() {
     if [ -d "$HOME/.termux" ]; then
         mkdir -p "$HOME/.termux/boot"
         install -m 700 "$MGL_HOME/boot-mobilegl-server.sh" "$HOME/.termux/boot/mobilegl-server.sh"
+        record "$HOME/.termux/boot/mobilegl-server.sh"
         ok "开机自启 → ~/.termux/boot/mobilegl-server.sh（装了 Termux:Boot 才会触发）"
     fi
 }
@@ -426,35 +445,85 @@ start_and_wait_server() {
 # ---------------------------------------------------------------------------
 # 验证：GLX 与 EGL 两条路都必须看到 Magma
 # ---------------------------------------------------------------------------
+x_alive() {  # <socket 路径> —— 真的 connect 一下，别只看文件在不在
+    python3 - "$1" <<'PYPY' >/dev/null 2>&1
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(1.0)
+try:
+    s.connect(sys.argv[1])
+except Exception:
+    sys.exit(1)
+finally:
+    s.close()
+PYPY
+}
+
+# 找一个能用的 X display：优先已有的 :0，没有就临时起一个，验完关掉。
+ensure_test_display() {
+    local sock="$PREFIX/tmp/.X11-unix/X0"
+    if [ -S "$sock" ] && x_alive "$sock"; then
+        printf '%s' ":0"; return 0
+    fi
+    local n=5
+    while [ -S "$PREFIX/tmp/.X11-unix/X$n" ]; do n=$((n + 1)); [ "$n" -gt 20 ] && break; done
+    info "没有运行中的 X 服务器，临时启动 :$n 做实测（验完即关）"
+    setsid termux-x11 ":$n" -listen unix >/dev/null 2>&1 &
+    TEST_X_PID=$!
+    STARTED_X=1
+    local i
+    for i in $(seq 1 30); do
+        x_alive "$PREFIX/tmp/.X11-unix/X$n" && { printf '%s' ":$n"; return 0; }
+        sleep 0.2
+    done
+    return 1
+}
+
+stop_test_display() {
+    [ "${STARTED_X:-0}" = 1 ] || return 0
+    [ -n "${TEST_X_PID:-}" ] && kill "$TEST_X_PID" 2>/dev/null || true
+    pkill -f "termux-x11 :5 -listen unix" 2>/dev/null || true
+    STARTED_X=0
+    dim "临时 X 已关闭"
+}
+
 verify_all() {
     head1 "验证（GLX + EGL 两条路）"
-    local fails=0 out
+    local fails=0 out dpy
 
-    # GLX：走登录 shell，顺带证明 /etc/profile.d 生效
-    out=$(in_debian 'command -v glxinfo >/dev/null || apt-get install -y -qq mesa-utils >/dev/null 2>&1; glxinfo -B 2>/dev/null' | grep -E 'OpenGL (renderer|core profile version) string' || true)
+    if ! dpy=$(ensure_test_display); then
+        err "无法准备 X 服务器，跳过实测"
+        info "装好 termux-x11 后运行：bash $MGL_HOME/gpu-check.sh"
+        return 1
+    fi
+    dim "测试用 DISPLAY=$dpy"
+
+    out=$(in_debian_login "command -v glxinfo >/dev/null || apt-get install -y -qq mesa-utils >/dev/null 2>&1; DISPLAY=$dpy glxinfo -B 2>/dev/null" \
+        | grep -E 'OpenGL (renderer|core profile version) string' || true)
     if printf '%s' "$out" | grep -q 'Magma (MobileGL Core)'; then
         ok "GLX → $(printf '%s' "$out" | grep 'renderer' | sed 's/.*string: *//')"
         dim "$(printf '%s' "$out" | grep 'core profile' | sed 's/.*string: *//')"
     else
         err "GLX 没走到 MobileGL："
-        printf '%s\n' "$out" | sed 's/^/      /' >&2
+        printf '%s\n' "${out:-（无输出）}" | sed 's/^/      /' >&2
         fails=$((fails + 1))
     fi
 
-    # EGL：装 es2_info（mesa-utils-extra）后查渲染器
-    out=$(in_debian 'command -v es2_info >/dev/null || apt-get install -y -qq mesa-utils-extra >/dev/null 2>&1; es2_info 2>/dev/null | grep -E "GL_RENDERER|EGL_VENDOR"' || true)
+    out=$(in_debian_login "command -v es2_info >/dev/null || apt-get install -y -qq mesa-utils-extra >/dev/null 2>&1; DISPLAY=$dpy es2_info 2>/dev/null" \
+        | grep -E 'EGL_VENDOR|GL_RENDERER' || true)
     if printf '%s' "$out" | grep -qi 'Magma\|MobileGL'; then
         ok "EGL → $(printf '%s' "$out" | grep -i 'GL_RENDERER' | sed 's/.*: *//')"
     else
         err "EGL 没走到 MobileGL："
-        printf '%s\n' "$out" | sed 's/^/      /' >&2
+        printf '%s\n' "${out:-（无输出）}" | sed 's/^/      /' >&2
         fails=$((fails + 1))
     fi
+
+    stop_test_display
 
     if [ "$fails" -eq 0 ]; then
         return 0
     fi
-
     err "$fails 条路径未通过"
     info "排查顺序：1) bash $MGL_HOME/gpu-check.sh   2) 看 /storage/emulated/0/MG/latest.server.log"
     return 1
@@ -510,7 +579,19 @@ uninstall_all() {
         err "仍有残留：${leftovers[*]}"; fails=$((fails + 1))
     fi
 
-    # Termux 侧：启动器与开机自启
+    # Termux 侧：先按清单删（覆盖"用户原先就有同名文件"与"不是软链"的情况）
+    if [ -f "$MANIFEST" ]; then
+        local rec
+        while IFS= read -r rec; do
+            [ -n "$rec" ] || continue
+            case "$rec" in
+                "$HOME"/*) rm -f "$rec" || true ;;
+            esac
+        done <"$MANIFEST"
+        rm -f "$MANIFEST"
+        ok "已按安装清单清理 Termux 侧文件"
+    fi
+
     local l
     for l in xfce.sh xfce-d.sh; do
         if [ -L "$HOME/$l" ]; then rm -f "$HOME/$l"; ok "已删启动器 ~/$l"; fi
@@ -585,7 +666,7 @@ main() {
     printf '    %s~/xfce.sh%s                  开桌面（自动确保服务端与 X）\n' "$C_B" "$C_RST"
     printf '    %sbash ~/mgl/gpu-check.sh%s     体检（两条路都出现 Magma 即正常）\n' "$C_B" "$C_RST"
     printf '    %sbash ~/mgl/gpu-check.sh 程序%s 用完整 GPU 环境跑任意程序\n' "$C_B" "$C_RST"
-    printf '    %sbash ~/mgl/gpu-check.sh --uninstall%s  其实卸载请用 install.sh --uninstall\n' "$C_B" "$C_RST"
+    printf '    %sbash install.sh --uninstall%s  卸载（按清单逐项删除并校验）\n' "$C_B" "$C_RST"
     printf '\n  日志：%s\n' "$LOG"
 }
 

@@ -1,5 +1,19 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
+# 按可执行文件名精确杀进程。
+# 为什么不用 pkill -f：它匹配整条命令行，会把"命令行里恰好含有这个名字"的 shell 一起杀掉
+# （实测过一次：卸载脚本把自己的父 shell 打成 SIGKILL）。
+killeq() {
+    local name="$1" p exe
+    for p in /proc/[0-9]*; do
+        exe=$(readlink "$p/exe" 2>/dev/null) || continue
+        [ "$(basename "$exe")" = "$name" ] || continue
+        [ "${p#/proc/}" = "$$" ] && continue
+        kill -9 "${p#/proc/}" 2>/dev/null || true
+    done
+}
+
+
 # ============================================
 #  XFCE 桌面启动器 (中文桌面，英文音频对话框)
 #  GPU 加速：MobileGL —— Magma 后端直连 Mali Vulkan (1.1.177)
@@ -49,11 +63,11 @@ fi
 # ---------- 清理旧桌面进程（不动 MobileGL 服务端） ----------
 # 注意：不能调 xfce-d.sh —— 那个会把 server 一起停掉，紧接着又要拉起来。
 log "清理旧桌面进程..."
-pkill -f "xfce4-session" 2>/dev/null || true
-pkill -f "termux-x11 :0" 2>/dev/null || true
-pkill -f "com.termux.x11" 2>/dev/null || true
+killeq xfce4-session
+killeq termux-x11
+killeq com.termux.x11
 # 旧 VirGL 链路若还有残留，顺手清掉（新版已不需要它）
-pkill -f "virgl_test_server" 2>/dev/null || true
+killeq virgl_test_server_android
 sleep 2
 log "清理完成"
 
