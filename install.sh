@@ -401,9 +401,21 @@ MOBILEGL_IPC_PROBE_TIMEOUT_MS=250'
 
     # 6. Chromium（Debian 包读 /etc/chromium.d/*）
     write_file_atomic "$PROOT_DIR/etc/chromium.d/50-mobilegl" \
-        'CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-gl=angle --use-angle=gl --ignore-gpu-blocklist --no-sandbox --disable-dev-shm-usage"'
+        'CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-gl=angle --use-angle=gles --ignore-gpu-blocklist --no-sandbox --disable-dev-shm-usage"'
     record "$PROOT_DIR/etc/chromium.d/50-mobilegl"
     ok "Chromium 旗标 → /etc/chromium.d/50-mobilegl"
+
+    # 6b. GL 1.x 兼容包装器：Magma（Vulkan 后端）把 glBegin/glVertex*/显示列表实现成空 stub，
+    #     老程序直接跑会得到黑窗口。legacy 通过 LD_PRELOAD 把立即模式翻译成 VBO + 着色器。
+    write_file_atomic "$PROOT_DIR/usr/local/bin/legacy" \
+        '#!/bin/sh
+# 给 Magma 补上 GL 1.x 固定管线（立即模式 / 矩阵栈 / 显示列表 / 客户端数组 / 纹理）。
+MGL_SHIM=/data/data/com.termux/files/home/mgl/lib/libfixfunc.so
+[ -f "$MGL_SHIM" ] || { echo "legacy: 找不到 $MGL_SHIM（运行 install.sh 安装）" >&2; exit 1; }
+LD_PRELOAD="$MGL_SHIM${LD_PRELOAD:+:$LD_PRELOAD}" exec "$@"'
+    chmod 755 "$PROOT_DIR/usr/local/bin/legacy" 2>/dev/null || true
+    record "$PROOT_DIR/usr/local/bin/legacy"
+    ok "GL 1.x 兼容包装器 → /usr/local/bin/legacy（容器内用 legacy <命令>）"
 
     # 7. 刷新动态链接缓存
     if in_debian 'ldconfig' >/dev/null 2>&1; then
