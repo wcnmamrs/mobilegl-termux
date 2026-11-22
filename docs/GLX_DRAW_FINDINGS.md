@@ -130,3 +130,36 @@ EGL 模式下 WebGL 能用，是因为 ANGLE 走的是单上下文路径（或�
 - `glXMakeCurrent` 成功后把 viewport 初始化成 drawable 的逻辑尺寸（`GLXImpl.cpp`），
   之前是 `0,0 0x0`；`glxprobe15` 复查：`viewport 0,0,320,240 -> vp=0,0,320,240` ✅
 - per-draw / per-readpixels 诊断日志，`MOBILEGL_GLX_TRACE=1` 打开（默认关闭，零开销）
+
+## 追加实验四（2026-11-22 22:20）—— 共享上下文修好了；Chromium 的 GLX 路径仍差一层
+
+### 真 bug 与修复（已验证）
+`glxprobe22/23` 用 `glGetTexLevelParameteriv` 直接问"B 眼里那个纹理是多大"：
+修复前 `B: tex 1 = 0x0`、B 自己的 FBO `0x8cd7`（附件不完整）；`eglctx` 日志显示
+`token=2 shareCtx=(nil) … group=2`（第二个上下文根本没收到 share，另起一组）。
+
+根因在 `MG_Impl/GLXImpl/GLXImpl.cpp` 的 `CreateContextAttribsARB`：`wantsEs` 分支
+**一律传 `nullptr` 当 share**（当时的注释写"共享上下文跨 API 不支持，直接不共享"）。
+ANGLE 在 GLX 上开的正是"两个 ES 上下文共享一个组"，于是 A 里画、B 里读。
+
+修法：`ContextObject` 记 `Bool EsApi`；ES 分支里只有当 share 自己也是 ES 时才递下去。
+修复后同一探针：
+```
+eglctx: token=2 shareCtx=0x1 found=1 group=1
+A: tex 1 = 200x200 … B: tex 1 = 200x200（共享了）
+B reads A's texture via own FBO   centre=0,255,0,255 err=0x0   ✅
+```
+`glTexImage2D` 与 `glTexStorage2D` 两种附件写法都验过（`glxprobe25`）。
+
+### Chromium 仍未通（同一上下文内丢内容）
+`MOBILEGL_GLX_TRACE=1` 下窗口跑 `file:///tmp/tri3.html`，只有**一个**上下文（`token=1 api=12448` = ES）：
+```
+glxtrace: DrawArrays mode=0x4 first=0 count=3 fbo=2 vp=0,0,200,200 scissorTest=0 box=0,0,200,200
+          prog=3 vao=2 idx=0 mask=1111 blend=0 depth=0 cull=0
+glxtrace: ReadPixels 1x1 at 100,100 fbo=2 first=255,0,0,255
+```
+状态全对（程序/VAO/颜色掩码/无 blend/无 depth/无 cull/viewport 正确），画完立刻读只有底色。
+所以既不是共享问题，也不是状态问题 —— 剩下的是"同一个上下文里，ANGLE 的 canvas FBO
+恰好落不进内容"，而自己写的同形状探针（ES3 + FBO + VAO + VBO）是全绿的。
+下一步要往 backend 走：在 Magma 的 `DrawArrays` 里打一次"当前 framebuffer/渲染通道"，
+确认 Vulkan 侧收到的是不是同一张图，再决定是 FBO 物化（twin）还是 render pass 的问题。
