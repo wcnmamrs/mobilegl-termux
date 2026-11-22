@@ -1,3 +1,63 @@
+diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/PipelineFactory.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/PipelineFactory.cpp
+index 7baa54d..0dca8b9 100644
+--- a/MobileGL/MG_Backend/DirectVulkan/Renderer/PipelineFactory.cpp
++++ b/MobileGL/MG_Backend/DirectVulkan/Renderer/PipelineFactory.cpp
+@@ -563,6 +563,24 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+         gpi.renderPass = payload.renderPass;
+         gpi.subpass = payload.subpass;
+ 
++        if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++            magmaTrace != nullptr && magmaTrace[0] == '1') {
++            MGLOG_I("magmatrace: pstate programHash=0x%llx topo=%d samples=%d cull=%d front=%d depthTest=%d depthWrite=%d "
++                    "depthCmp=%d bias=%d discard=%d stencil=%d logic=%d colors=%u subpass=%u",
++                    static_cast<unsigned long long>(payload.programHash), static_cast<Int>(payload.topology),
++                    static_cast<Int>(payload.rasterizationSamples), static_cast<Uint32>(payload.cullMode),
++                    static_cast<Int>(payload.frontFace), payload.depthTestEnable ? 1 : 0,
++                    payload.depthWriteEnable ? 1 : 0, static_cast<Int>(payload.depthCompareOp),
++                    payload.depthBiasEnable ? 1 : 0, payload.rasterizerDiscardEnable ? 1 : 0,
++                    payload.stencilTestEnable ? 1 : 0, payload.logicOpEnable ? 1 : 0, payload.colorAttachmentCount,
++                    payload.subpass);
++            if (payload.stageSpirvDigests != nullptr) {
++                for (SizeT i = 0; i < payload.stageSpirvDigests->size(); ++i)
++                    MGLOG_I("magmatrace: pstate stage[%u] bits=0x%x words=%u digest=0x%llx", static_cast<Uint>(i),
++                            (*payload.stageSpirvDigests)[i].stage, (*payload.stageSpirvDigests)[i].wordCount,
++                            static_cast<unsigned long long>((*payload.stageSpirvDigests)[i].hash));
++            }
++        }
+         VkPipeline pipeline = VK_NULL_HANDLE;
+         const VkResult result = vkCreateGraphicsPipelines(m_device, m_pipelineCache, 1, &gpi, nullptr, &pipeline);
+         // Loud, at MGLOG_F, and deliberately NOT latched. vkCreateGraphicsPipelines refusing a
+diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/UniformManager.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/UniformManager.cpp
+index 96f9ce2..dab5732 100644
+--- a/MobileGL/MG_Backend/DirectVulkan/Renderer/UniformManager.cpp
++++ b/MobileGL/MG_Backend/DirectVulkan/Renderer/UniformManager.cpp
+@@ -1124,6 +1124,12 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+                 out.buffer = source.buffer;
+                 out.range = blockSize;
+                 out.dynamicOffset = absoluteOffset;
++                if (std::getenv("MOBILEGL_UBO_TRACE") != nullptr) {
++                    MGLOG_E("ubotrace direct binding=%u block=%u rangeOff=%llu rangeSize=%llu sliceOff=%llu dyn=%llu blockSize=%llu",
++                            bindingPoint, blockIndex, (unsigned long long)range.Offset,
++                            (unsigned long long)range.Size, (unsigned long long)source.offset,
++                            (unsigned long long)absoluteOffset, (unsigned long long)blockSize);
++                }
+                 return true;
+             }
+         }
+@@ -1132,6 +1138,13 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+         // client's shadow: zero the complete reflected block, then GPU-copy only bytes
+         // inside the GL binding range. A readback here could retire the command buffer
+         // whose value BindProgramUniformBuffers is currently holding.
++        if (std::getenv("MOBILEGL_UBO_TRACE") != nullptr) {
++            MGLOG_E("ubotrace binding=%u block=%u blockSize=%llu rangeOff=%llu rangeSize=%llu sliceOff=%llu sliceSize=%llu start=%llu avail=%llu bound=%d",
++                    bindingPoint, blockIndex, (unsigned long long)blockSize,
++                    (unsigned long long)range.Offset, (unsigned long long)range.Size,
++                    (unsigned long long)source.offset, (unsigned long long)source.size,
++                    (unsigned long long)start, (unsigned long long)available, (int)bound);
++        }
+         const VkDeviceSize copied = std::min(available, blockSize);
+         static thread_local Vector<Uint8> zero;
+         zero.assign(static_cast<SizeT>(blockSize), 0);
 diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.cpp
 index e7f1b1a..d1e6236 100644
 --- a/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.cpp
@@ -26,6 +86,115 @@ index 11209a6..9742f43 100644
  
          // SHARED-IMAGE SYNCHRONIZATION (WireSharedImage.cpp). The sync_file fences other sessions
          // publish become binary semaphores: a temporary SYNC_FD import is a WAIT, an exportable
+diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRendererPipeline.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRendererPipeline.cpp
+index c523e7d..b45f88d 100644
+--- a/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRendererPipeline.cpp
++++ b/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRendererPipeline.cpp
+@@ -996,6 +996,25 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+             syntheticVertexInputState.pNext = vis.state.pNext;
+             pipelineVertexInputState = &syntheticVertexInputState;
+         }
++        if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++            magmaTrace != nullptr && magmaTrace[0] == '1') {
++            MGLOG_I("magmatrace: pipeline program=%u mode=%d bindings=%u attributes=%u loc=0x%x active=0x%x missing=0x%x "
++                    "synthetic=%d",
++                    program.GetExternalIndex(), static_cast<Int>(mode),
++                    pipelineVertexInputState->vertexBindingDescriptionCount,
++                    pipelineVertexInputState->vertexAttributeDescriptionCount, vis.attributeLocationMask,
++                    activeAttribMask, missingAttribMask, static_cast<Int>(pipelineVertexInputState == &syntheticVertexInputState));
++            for (uint32_t bi = 0; bi < pipelineVertexInputState->vertexBindingDescriptionCount; ++bi) {
++                const auto& b = pipelineVertexInputState->pVertexBindingDescriptions[bi];
++                MGLOG_I("magmatrace: pipeline binding[%u] index=%u stride=%u rate=%d", bi, b.binding, b.stride,
++                        static_cast<Int>(b.inputRate));
++            }
++            for (uint32_t ai = 0; ai < pipelineVertexInputState->vertexAttributeDescriptionCount; ++ai) {
++                const auto& a = pipelineVertexInputState->pVertexAttributeDescriptions[ai];
++                MGLOG_I("magmatrace: pipeline attribute[%u] loc=%u binding=%u format=%d offset=%u", ai, a.location,
++                        a.binding, static_cast<Int>(a.format), a.offset);
++            }
++        }
+         auto cullFaceEnabled = MG_Pipe::gPipeInputs->IsCapabilityEnabled(CapabilityInput::CullFace);
+         auto depthTestEnabled = MG_Pipe::gPipeInputs->IsCapabilityEnabled(CapabilityInput::DepthTest);
+         auto polygonOffsetFillEnabled = MG_Pipe::gPipeInputs->IsCapabilityEnabled(CapabilityInput::PolygonOffsetFill) &&
+diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireDraw.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/WireDraw.cpp
+index 69906b2..23f1d8a 100644
+--- a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireDraw.cpp
++++ b/MobileGL/MG_Backend/DirectVulkan/Renderer/WireDraw.cpp
+@@ -667,6 +667,12 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+                 created.layers = layers;
+                 created.hash = created.compatibilityHash =
+                     XXH64(colors.data(), colors.size() * sizeof(colors[0]), passHash);
++                if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++                    magmaTrace != nullptr && magmaTrace[0] == '1') {
++                    for (SizeT i = 0; i < viewInfos.size(); ++i)
++                        MGLOG_I("magmatrace: pass fb=%p extent=%ux%u attach[%u] image=%p", (void*)created.framebuffer,
++                                extent.width, extent.height, static_cast<Uint>(i), (void*)viewInfos[i].image);
++                }
+                 created.wireAttachments.assign(attachments.begin(), attachments.end());
+                 created.wireColors.assign(colors.begin(), colors.end());
+                 created.wireDepth = depth;
+@@ -1152,6 +1158,25 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+             MGL_WIRE_DECLINE_AT(BeginRenderPass, "the render pass for this draw could not be begun");
+             return false;
+         }
++        if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++            magmaTrace != nullptr && magmaTrace[0] == '1') {
++            for (SizeT si = 0; si < vertexSlices.size(); ++si) {
++                const auto& slice = vertexSlices[si];
++                const auto* floats = slice.mapped != nullptr
++                                         ? reinterpret_cast<const float*>(static_cast<const char*>(slice.mapped) + slice.offset)
++                                         : nullptr;
++                MGLOG_I("magmatrace: slice[%u] buf=%p off=%llu size=%llu mapped=%p v0=(%g,%g,%g) v1=(%g,%g,%g)",
++                        static_cast<Uint>(si), (void*)slice.buffer, static_cast<unsigned long long>(slice.offset),
++                        static_cast<unsigned long long>(slice.size), slice.mapped,
++                        floats != nullptr ? floats[0] : 0.f, floats != nullptr ? floats[1] : 0.f,
++                        floats != nullptr ? floats[2] : 0.f, floats != nullptr ? floats[3] : 0.f,
++                        floats != nullptr ? floats[4] : 0.f, floats != nullptr ? floats[5] : 0.f);
++            }
++            MGLOG_I("magmatrace: draw mode=%d vtxSlices=%u locMask=0x%x attrMask=0x%x default=%d",
++                    static_cast<Int>(mode), static_cast<Uint>(vertexSlices.size()),
++                    static_cast<Uint>(programObj.activeVertexInputLocationMask),
++                    static_cast<Uint>(input.attributeLocationMask), static_cast<Int>(fbo->IsDefault));
++        }
+         if (!bindShadow.graphicsPipelineValid || bindShadow.graphicsPipeline != pipeline) {
+             vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+             bindShadow.graphicsPipelineValid = true;
+diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireFramebuffer.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/WireFramebuffer.cpp
+index 331228b..ad8e576 100644
+--- a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireFramebuffer.cpp
++++ b/MobileGL/MG_Backend/DirectVulkan/Renderer/WireFramebuffer.cpp
+@@ -728,6 +728,17 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+         if (out.level >= resource->mipLevels ||
+             out.layer + out.layers > (out.is3D ? std::max(resource->depth >> level, 1u) : resource->arrayLayers))
+             MagmaWireFatal("framebuffer-subresource");
++        // 临时诊断（MOBILEGL_MAGMA_TRACE=1 时才有）：把"绘制目标"和"回读源"各自解析到的图象记下来，
++        // 两者若不是同一张图，就说明 FBO 的读写两面对不到一起。
++        if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++            magmaTrace != nullptr && magmaTrace[0] != '\0' && magmaTrace[0] != '0') {
++            MGLOG_I("magmatrace: resolve write=%d fbo=%u.%u surface=%u.%u kind=%d extent=%ux%u fmt=%d level=%u "
++                    "layer=%u image=%p",
++                    static_cast<Int>(isWriteTarget), static_cast<Uint>(fbo.Fbo.Slot), static_cast<Uint>(fbo.Fbo.Gen),
++                    static_cast<Uint>(surface.Res.Slot), static_cast<Uint>(surface.Res.Gen),
++                    static_cast<Int>(surface.Kind), out.extent.width, out.extent.height,
++                    static_cast<Int>(out.format), out.level, out.layer, static_cast<void*>(out.image));
++        }
+         return out;
+     }
+ 
+@@ -1324,7 +1335,12 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+             if (LatchWireDeviceLoss("wire-verb-flush")) return;
+             MagmaWireFatal("wire-verb-flush");
+         }
+-        const auto* fbo = MG_Pipe::MGPipeApplier().ReadFramebuffer();
++        // 临时诊断：MOBILEGL_MAGMA_TRACE_READDRAW=1 时，回读改用"绘制面"的记录。
++        // 如果这样就能读到画进去的像素，说明问题在读写两面的记录对不上，而不是绘制本身。
++        const char* readDrawEnv = std::getenv("MOBILEGL_MAGMA_TRACE_READDRAW");
++        const Bool readViaDraw = readDrawEnv != nullptr && readDrawEnv[0] == '1';
++        const auto* fbo = readViaDraw ? MG_Pipe::MGPipeApplier().DrawFramebuffer()
++                                      : MG_Pipe::MGPipeApplier().ReadFramebuffer();
+         if (!fbo) MagmaWireFatal("read-framebuffer-record");
+         VkImageAspectFlags aspect = format == GL_DEPTH_COMPONENT ? VK_IMAGE_ASPECT_DEPTH_BIT
+                                     : format == GL_STENCIL_INDEX ? VK_IMAGE_ASPECT_STENCIL_BIT
 diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp
 index e3bf68a..e398fbb 100644
 --- a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp
@@ -403,6 +572,114 @@ index 0047184..2fb4e73 100644
          GL::PixelStorei(GL_PACK_ALIGNMENT, alignment);
          GL::PixelStorei(GL_PACK_ROW_LENGTH, rowLength);
          GL::PixelStorei(GL_PACK_SKIP_ROWS, skipRows);
+diff --git a/MobileGL/MG_Impl/GLImpl/Buffer/GL_Buffer.cpp b/MobileGL/MG_Impl/GLImpl/Buffer/GL_Buffer.cpp
+index ffeeb99..c6dc7f2 100644
+--- a/MobileGL/MG_Impl/GLImpl/Buffer/GL_Buffer.cpp
++++ b/MobileGL/MG_Impl/GLImpl/Buffer/GL_Buffer.cpp
+@@ -7,6 +7,7 @@
+ // End of Source File Header
+ 
+ #include "GL_Buffer.h"
++#include <cstdlib>
+ #include "Validators.h"
+ #include "../Texture/GL_Texture.h"
+ #include "../Getter/GL_Getter.h"
+@@ -992,6 +993,19 @@ namespace MobileGL::MG_Impl::GLImpl {
+     void BufferData_State(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
+         MGLOG_D("%s: %s, size = %d, data = %p, usage = %s", __func__, MG_Util::ConvertGLEnumToString(target).c_str(),
+                 size, data, MG_Util::ConvertGLEnumToString(usage).c_str());
++        if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++            magmaTrace != nullptr && magmaTrace[0] == '1' && data != nullptr && size > 0 && size <= 96) {
++            const float* floats = static_cast<const float*>(data);
++            Int limit = static_cast<Int>(size / 4);
++            if (limit > 6) limit = 6;
++            char text[192] = {};
++            int used = 0;
++            for (Int i = 0; i < limit && used < static_cast<Int>(sizeof(text)) - 24; ++i)
++                used += std::snprintf(text + used, sizeof(text) - static_cast<SizeT>(used), i == 0 ? "%g" : ",%g",
++                                      static_cast<double>(floats[i]));
++            MGLOG_I("magmatrace: bufferdata target=0x%x size=%d first=[%s]", static_cast<Uint32>(target),
++                    static_cast<Int>(size), text);
++        }
+         if (size < 0) {
+             MG_State::pGLContext->RecordError(
+                 ErrorCode::InvalidValue,
+@@ -1647,6 +1661,12 @@ namespace MobileGL::MG_Impl::GLImpl {
+         } else {
+             point.ClearRange();
+         }
++        if (std::getenv("MOBILEGL_SB_TRACE") != nullptr) {
++            const auto after = point.GetRange();
++            MGLOG_E("sbtrace bindrange target=%d index=%u buffer=%u obj=%d explicit=%d start=%lld end=%lld",
++                    (int)target, index, buffer, (int)(bufferObject != nullptr), (int)point.HasExplicitRange(),
++                    (long long)after.start, (long long)after.end);
++        }
+         // Also the generic binding point, exactly as BindBufferBase (GL 4.6 core 6.1.1).
+         GetBufferBindingSlot(bufferTarget).Bind(bufferObject);
+     }
+diff --git a/MobileGL/MG_Impl/GLImpl/Drawing/GL_Drawing.cpp b/MobileGL/MG_Impl/GLImpl/Drawing/GL_Drawing.cpp
+index 75d6c15..d40d1b6 100644
+--- a/MobileGL/MG_Impl/GLImpl/Drawing/GL_Drawing.cpp
++++ b/MobileGL/MG_Impl/GLImpl/Drawing/GL_Drawing.cpp
+@@ -577,6 +577,12 @@ namespace MobileGL::MG_Impl::GLImpl {
+         ZoneScopedC(TRACY_ZONECOLOR_BACKEND);
+ #endif
+         if (ConditionalRenderDiscardsCommand()) return;
++        if (::getenv("MOBILEGL_GLX_TRACE") != nullptr) {
++            const auto& traceFbo =
++                MG_State::pGLContext->GetFramebufferBindingSlot(FramebufferTarget::Draw).GetBoundObject();
++            MGLOG_I("glxtrace: Clear mask=0x%x fbo=%d", static_cast<unsigned>(mask),
++                    traceFbo ? static_cast<int>(traceFbo->GetExternalIndex()) : -1);
++        }
+         MGP_FILL(Clear);
+         MG_Backend::gBackendFunctionsTable.GL.Clear(mask);
+     }
+@@ -611,11 +617,45 @@ namespace MobileGL::MG_Impl::GLImpl {
+                                                                           basevertex);
+     }
+ 
++namespace {
++    // 临时诊断：MOBILEGL_GLX_TRACE=1 时把每次 draw 的目标帧缓冲、viewport、scissor 打出来，
++    // 用来判断某个上层的绘制到底落在哪里（ANGLE 在 GLX 模式下丢内容时用过这招）。
++    Bool DrawTraceEnabled() {
++        static const Bool enabled = ::getenv("MOBILEGL_GLX_TRACE") != nullptr;
++        return enabled;
++    }
++
++    void TraceDraw(const char* what, GLenum mode, GLint first, GLsizei count) {
++        if (!DrawTraceEnabled()) return;
++        const auto& fbo = MG_State::pGLContext->GetFramebufferBindingSlot(FramebufferTarget::Draw).GetBoundObject();
++        const IntVec4 viewport = MG_State::pGLContext->GetViewport();
++        const IntVec4& box = MG_State::pGLContext->GetScissorBox();
++        GLint program = 0;
++        GLint vao = 0;
++        GLint idxBinding = 0;
++        GLboolean colorMask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
++        MG_Impl::GLImpl::GetIntegerv(GL_CURRENT_PROGRAM, &program);
++        MG_Impl::GLImpl::GetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
++        MG_Impl::GLImpl::GetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &idxBinding);
++        MG_Impl::GLImpl::GetBooleanv(GL_COLOR_WRITEMASK, colorMask);
++        MGLOG_I("glxtrace: %s mode=0x%x first=%d count=%d fbo=%u vp=%d,%d,%d,%d scissorTest=%d box=%d,%d,%d,%d "
++                "prog=%d vao=%d idx=%d mask=%d%d%d%d blend=%d depth=%d cull=%d",
++                what, mode, first, count, fbo ? fbo->GetExternalIndex() : 0u, viewport.x(), viewport.y(), viewport.z(),
++                viewport.w(), static_cast<Int>(MG_State::pGLContext->IsCapabilityEnabled(CapabilityInput::ScissorTest)),
++                box.x(), box.y(), box.z(), box.w(), program, vao, idxBinding, colorMask[0] ? 1 : 0, colorMask[1] ? 1 : 0,
++                colorMask[2] ? 1 : 0, colorMask[3] ? 1 : 0,
++                static_cast<Int>(MG_State::pGLContext->IsCapabilityEnabled(CapabilityInput::Blend)),
++                static_cast<Int>(MG_State::pGLContext->IsCapabilityEnabled(CapabilityInput::DepthTest)),
++                static_cast<Int>(MG_State::pGLContext->IsCapabilityEnabled(CapabilityInput::CullFace)));
++    }
++} // namespace
++
+     void DrawArrays_Backend(GLenum mode, GLint first, GLsizei count) {
+ #ifdef TRACY_ENABLE
+         ZoneScopedC(TRACY_ZONECOLOR_BACKEND);
+ #endif
+         if (ConditionalRenderDiscardsCommand()) return;
++        TraceDraw("DrawArrays", mode, first, count);
+         MGP_FILL(DrawArrays);
+         MG_Backend::gBackendFunctionsTable.GL.DrawArrays(mode, first, count);
+     }
 diff --git a/MobileGL/MG_Impl/GLImpl/Exporting/Definitions.cpp b/MobileGL/MG_Impl/GLImpl/Exporting/Definitions.cpp
 index 1270df3..5caa9a1 100644
 --- a/MobileGL/MG_Impl/GLImpl/Exporting/Definitions.cpp
@@ -783,6 +1060,87 @@ index 1270df3..5caa9a1 100644
  DECLARE_GL_FUNCTION_STUB_HEAD(GLboolean, IsList, GLuint list) DECLARE_GL_FUNCTION_STUB_END(GLboolean, IsList, list)
  DECLARE_GL_FUNCTION_STUB_HEAD(void, DeleteLists, GLuint list, GLsizei range) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, DeleteLists, list, range)
  DECLARE_GL_FUNCTION_STUB_HEAD(GLuint, GenLists, GLsizei range) DECLARE_GL_FUNCTION_STUB_END(GLuint, GenLists, range)
+diff --git a/MobileGL/MG_Impl/GLImpl/Framebuffer/GL_Framebuffer.cpp b/MobileGL/MG_Impl/GLImpl/Framebuffer/GL_Framebuffer.cpp
+index eba8df2..cc9de91 100644
+--- a/MobileGL/MG_Impl/GLImpl/Framebuffer/GL_Framebuffer.cpp
++++ b/MobileGL/MG_Impl/GLImpl/Framebuffer/GL_Framebuffer.cpp
+@@ -3045,6 +3045,18 @@ namespace MobileGL::MG_Impl::GLImpl {
+     void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels) {
+         if (!ReadPixels_State(x, y, width, height, format, type, pixels)) return;
+         ReadPixels_Backend(x, y, width, height, format, type, pixels);
++        if (::getenv("MOBILEGL_GLX_TRACE") != nullptr) {
++            const auto& fbo =
++                MG_State::pGLContext->GetFramebufferBindingSlot(FramebufferTarget::Read).GetBoundObject();
++            const auto* bytes = static_cast<const unsigned char*>(pixels);
++            if (bytes != nullptr && format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
++                MGLOG_I("glxtrace: ReadPixels %dx%d at %d,%d fbo=%u first=%u,%u,%u,%u", width, height, x, y,
++                        fbo ? fbo->GetExternalIndex() : 0u, bytes[0], bytes[1], bytes[2], bytes[3]);
++            } else {
++                MGLOG_I("glxtrace: ReadPixels %dx%d at %d,%d fbo=%u format=0x%x type=0x%x", width, height, x, y,
++                        fbo ? fbo->GetExternalIndex() : 0u, format, type);
++            }
++        }
+     }
+ 
+     // Bytes glReadPixels would write for this rectangle under the current GL_PACK_* state
+diff --git a/MobileGL/MG_Impl/GLImpl/Program/GL_Program.cpp b/MobileGL/MG_Impl/GLImpl/Program/GL_Program.cpp
+index 5c4a80d..7ed7300 100644
+--- a/MobileGL/MG_Impl/GLImpl/Program/GL_Program.cpp
++++ b/MobileGL/MG_Impl/GLImpl/Program/GL_Program.cpp
+@@ -1938,6 +1938,14 @@ namespace MobileGL::MG_Impl::GLImpl {
+     }
+ 
+     void Uniform4fv_State(GLint location, GLsizei count, const GLfloat* value) {
++        if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++            magmaTrace != nullptr && magmaTrace[0] == '1' && value != nullptr) {
++            const auto& uniformProgram = MG_State::pGLContext->GetProgramForUniform();
++            MGLOG_I("magmatrace: uniform4fv prog=%u loc=%d count=%d v=[%g,%g,%g,%g]",
++                    uniformProgram ? uniformProgram->GetExternalIndex() : 0u, static_cast<Int>(location),
++                    static_cast<Int>(count), static_cast<double>(value[0]), static_cast<double>(value[1]),
++                    static_cast<double>(value[2]), static_cast<double>(value[3]));
++        }
+         Uniformv_State<4>(location, count, value);
+     }
+ 
+@@ -2019,6 +2027,14 @@ namespace MobileGL::MG_Impl::GLImpl {
+     }
+ 
+     void UniformMatrix4fv_State(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
++        if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++            magmaTrace != nullptr && magmaTrace[0] == '1' && value != nullptr && count == 1) {
++            const auto& uniformProgram = MG_State::pGLContext->GetProgramForUniform();
++            MGLOG_I("magmatrace: matrix4fv prog=%u loc=%d t=%d m00=%g m11=%g tx=%g ty=%g",
++                    uniformProgram ? uniformProgram->GetExternalIndex() : 0u, static_cast<Int>(location),
++                    static_cast<Int>(transpose), static_cast<double>(value[0]), static_cast<double>(value[5]),
++                    static_cast<double>(value[12]), static_cast<double>(value[13]));
++        }
+         // For 4x4 matrices, we have 16 elements per matrix
+         // If transpose is GL_TRUE, we need to transpose the matrix data
+         if (location == -1) return;
+@@ -2655,6 +2671,11 @@ namespace MobileGL::MG_Impl::GLImpl {
+     }
+ 
+     void Uniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
++        if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++            magmaTrace != nullptr && magmaTrace[0] == '1') {
++            const auto& uniformProgram = MG_State::pGLContext->GetProgramForUniform();
++            MGLOG_I("magmatrace: uniform4f prog=%u loc=%d v=[%g,%g,%g,%g]", uniformProgram ? uniformProgram->GetExternalIndex() : 0u, static_cast<Int>(location), static_cast<double>(v0), static_cast<double>(v1), static_cast<double>(v2), static_cast<double>(v3));
++        }
+         GLfloat v[] = {v0, v1, v2, v3};
+         Uniform4fv(location, 1, v);
+     }
+@@ -3101,6 +3122,11 @@ namespace MobileGL::MG_Impl::GLImpl {
+     }
+ 
+     void ProgramUniform4f(GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
++        if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++            magmaTrace != nullptr && magmaTrace[0] == '1') {
++            const auto& uniformProgram = MG_State::pGLContext->GetProgramForUniform();
++            MGLOG_I("magmatrace: programuniform4f prog=%u loc=%d v=[%g,%g,%g,%g]", uniformProgram ? uniformProgram->GetExternalIndex() : 0u, static_cast<Uint>(program), static_cast<Int>(location), static_cast<double>(v0), static_cast<double>(v1), static_cast<double>(v2), static_cast<double>(v3));
++        }
+         GLfloat v[] = {v0, v1, v2, v3};
+         ProgramUniform4fv(program, location, 1, v);
+     }
 diff --git a/MobileGL/MG_Impl/GLImpl/Texture/GL_Texture.cpp b/MobileGL/MG_Impl/GLImpl/Texture/GL_Texture.cpp
 index 4268e63..b990a00 100644
 --- a/MobileGL/MG_Impl/GLImpl/Texture/GL_Texture.cpp
@@ -863,18 +1221,19 @@ index f3ccc74..5fd7ab2 100644
  MOBILEGL_GLX_API void glXUseXFont(unsigned long, int, int, int) {
      GLXStreamLock streamLock;
 diff --git a/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp b/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
-index 6684389..44f4f54 100644
+index 6684389..9e3a132 100644
 --- a/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
 +++ b/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
-@@ -14,6 +14,7 @@
+@@ -14,6 +14,8 @@
  #include "../GetProcAddress.h"
  #include "X11Present.h"
  #include "X11PresentXcb.h"
++#include "../GLImpl/RenderState/GL_RenderState.h"
 +#include "X11WindowPresent.h"
  #include <Init.h>
  #include <Config.h>
  #include <MG_Backend/BackendObjects.h>
-@@ -69,6 +70,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -69,6 +71,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
          constexpr int GLX_WIDTH = 0x801D;
          constexpr int GLX_HEIGHT = 0x801E;
          constexpr int GLX_WINDOW_BIT = 0x00000001;
@@ -885,7 +1244,33 @@ index 6684389..44f4f54 100644
          constexpr int GLX_RGBA_BIT = 0x00000001;
          constexpr int GLX_SAMPLE_BUFFERS = 100000;
          constexpr int GLX_SAMPLES = 100001;
-@@ -186,6 +191,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -87,15 +93,22 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         constexpr int GLX_CONTEXT_CORE_PROFILE_BIT_ARB = 0x00000001;
+         constexpr int GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB = 0x00000002;
+         constexpr int GLX_CONTEXT_OPENGL_NO_ERROR_ARB = 0x31B3;
++        // GLX_EXT_create_context_es_profile / _es2_profile: glxext.h 里两者同值 0x4，作为
++        // GLX_CONTEXT_PROFILE_MASK_ARB 的一位传入。Chromium 的 ANGLE 初始化 GL 时第一个尝试就是
++        // "在 GLX 上开 OpenGL ES"，没有这一位它就整条链放弃（eglInitialize 全失败）。
++        constexpr int GLX_CONTEXT_ES_PROFILE_BIT_EXT = 0x00000004;
+ 
+         constexpr const char* kGLXExtensions =
+             "GLX_ARB_create_context GLX_ARB_create_context_no_error GLX_ARB_create_context_profile "
+-            "GLX_ARB_get_proc_address GLX_EXT_swap_control GLX_MESA_swap_control GLX_SGI_swap_control";
++            "GLX_ARB_get_proc_address GLX_EXT_create_context_es_profile "
++            "GLX_EXT_create_context_es2_profile GLX_EXT_swap_control GLX_MESA_swap_control "
++            "GLX_SGI_swap_control";
+         // The server answers its surfaces' buffer age (EGL_EXT_buffer_age) when it has shared images.
+         constexpr const char* kGLXExtensionsWithBufferAge =
+             "GLX_ARB_create_context GLX_ARB_create_context_no_error GLX_ARB_create_context_profile "
+-            "GLX_ARB_get_proc_address GLX_EXT_swap_control GLX_MESA_swap_control GLX_SGI_swap_control "
+-            "GLX_EXT_buffer_age";
++            "GLX_ARB_get_proc_address GLX_EXT_create_context_es_profile "
++            "GLX_EXT_create_context_es2_profile GLX_EXT_swap_control GLX_MESA_swap_control "
++            "GLX_SGI_swap_control GLX_EXT_buffer_age";
+ 
+         const char* GLXExtensions() {
+             return EGLImpl::SharedImagesAvailable() ? kGLXExtensionsWithBufferAge : kGLXExtensions;
+@@ -186,6 +199,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
                                        const Uint8*) = nullptr;
              Uint32 (*MaximumRequestLength)(void*) = nullptr;
              int (*Flush)(void*) = nullptr;
@@ -893,7 +1278,7 @@ index 6684389..44f4f54 100644
  
              Bool Valid() const {
                  return GetXCBConnection && GenerateId && CreateGC && FreeGC && PutImage && MaximumRequestLength &&
-@@ -208,6 +214,8 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -208,6 +222,8 @@ namespace MobileGL::MG_Impl::GLXImpl {
                      fns->MaximumRequestLength = reinterpret_cast<decltype(fns->MaximumRequestLength)>(
                          dlsym(xcb, "xcb_get_maximum_request_length"));
                      fns->Flush = reinterpret_cast<decltype(fns->Flush)>(dlsym(xcb, "xcb_flush"));
@@ -902,7 +1287,7 @@ index 6684389..44f4f54 100644
                  }
                  if (!fns->Valid()) {
                      MGLOG_E_ONCE("glx: libX11-xcb/libxcb entry points missing; remote windows are not shown");
-@@ -219,21 +227,85 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -219,24 +235,91 @@ namespace MobileGL::MG_Impl::GLXImpl {
  
          constexpr Uint8 kXcbImageFormatZPixmap = 2;
  
@@ -998,7 +1383,13 @@ index 6684389..44f4f54 100644
          }
  
          struct ContextObject {
-@@ -372,8 +444,47 @@ namespace MobileGL::MG_Impl::GLXImpl {
++            // 这个上下文是 ES 还是桌面 GL：EGL 不允许两个不同 client API 的上下文共享对象，
++            // 所以建 ES 上下文时只有"ES 的 share"才能递下去。
++            Bool EsApi = false;
+             ::Display* XDisplay = nullptr;
+             EGLDisplay Display = EGL_NO_DISPLAY;
+             EGLConfig Config = nullptr;
+@@ -372,8 +455,47 @@ namespace MobileGL::MG_Impl::GLXImpl {
              return it == contexts.end() ? nullptr : &it->second;
          }
  
@@ -1046,7 +1437,7 @@ index 6684389..44f4f54 100644
              const auto& x11 = X11();
              if (!x11.Valid() || !dpy || drawable == 0) {
                  return false;
-@@ -502,10 +613,25 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -502,10 +624,25 @@ namespace MobileGL::MG_Impl::GLXImpl {
              const EGLint bandRows = std::max<EGLint>(1, static_cast<EGLint>(budget / rowBytes));
              for (EGLint y = 0; y < height; y += bandRows) {
                  const EGLint rows = std::min(bandRows, height - y);
@@ -1076,7 +1467,7 @@ index 6684389..44f4f54 100644
              }
              (void)xcb.Flush(connection);
          }
-@@ -527,6 +653,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -527,6 +664,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
          // (same contract as the WGL and CGL layers). Polling XGetGeometry is a
          // server round trip, so throttle steady-state swaps.
          void SyncSurfaceSize(Display* dpy, GLXDrawableHandle drawable, DrawableSurface& surface, Bool force = false) {
@@ -1087,7 +1478,41 @@ index 6684389..44f4f54 100644
              const auto now = std::chrono::steady_clock::now();
              if (!force && now - surface.LastSizePoll < std::chrono::milliseconds(250)) {
                  return;
-@@ -702,7 +832,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -597,14 +738,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         }
+ 
+         GLXContextHandle CreateContextFromEGLAttribs(Display* dpy, const FBConfigInfo* fbconfig, GLXContextHandle share,
+-                                                     const EGLint* contextAttribs) {
++                                                     const EGLint* contextAttribs, Bool esApi = false) {
+             const std::lock_guard<std::recursive_mutex> lock(RegistryMutex());
+             EGLDisplay display = EnsureDisplay();
+             if (display == EGL_NO_DISPLAY) {
+                 MGLOG_E_ONCE("glx: no EGL display");
+                 return nullptr;
+             }
+-            EGLImpl::BindAPI(EGL_OPENGL_API);
++            EGLImpl::BindAPI(esApi ? EGL_OPENGL_ES_API : EGL_OPENGL_API);
+ 
+             EGLContext shareContext = EGL_NO_CONTEXT;
+             if (share) {
+@@ -631,7 +772,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+                 EGL_SURFACE_TYPE,
+                 EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
+                 EGL_RENDERABLE_TYPE,
+-                EGL_OPENGL_BIT,
++                esApi ? EGL_OPENGL_ES2_BIT : EGL_OPENGL_BIT,
+                 EGL_NONE,
+             };
+             EGLConfig config = nullptr;
+@@ -648,6 +789,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+             }
+ 
+             ContextObject object;
++            object.EsApi = esApi;
+             object.XDisplay = dpy;
+             object.Display = display;
+             object.Config = config;
+@@ -702,7 +844,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  *value = GLX_RGBA_BIT;
                  return 0;
              case GLX_DRAWABLE_TYPE:
@@ -1099,7 +1524,7 @@ index 6684389..44f4f54 100644
                  return 0;
              case GLX_X_RENDERABLE:
                  *value = 1;
-@@ -722,7 +855,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -722,7 +867,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  *value = 0;
                  return 0;
              case GLX_VISUAL_ID: {
@@ -1111,7 +1536,7 @@ index 6684389..44f4f54 100644
                  if (x11.Valid() && dpy) {
                      const int screen = x11.GetDefaultScreen(dpy);
                      void* visual = x11.GetDefaultVisual(dpy, screen);
-@@ -831,27 +967,31 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -831,27 +979,31 @@ namespace MobileGL::MG_Impl::GLXImpl {
          return GetClientString(dpy, name);
      }
  
@@ -1151,7 +1576,7 @@ index 6684389..44f4f54 100644
          if (attribList) {
              for (SizeT i = 0; attribList[i] != 0; i += 2) {
                  const int attrib = attribList[i];
-@@ -861,16 +1001,16 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -861,16 +1013,16 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  }
                  switch (attrib) {
                  case GLX_STENCIL_SIZE:
@@ -1174,7 +1599,7 @@ index 6684389..44f4f54 100644
                          }
                      }
                      break;
-@@ -879,22 +1019,30 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -879,22 +1031,30 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  case GLX_BLUE_SIZE:
                  case GLX_ALPHA_SIZE:
                      if (value > 8) {
@@ -1209,7 +1634,7 @@ index 6684389..44f4f54 100644
                      }
                      break;
                  case GLX_STEREO:
-@@ -907,17 +1055,28 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -907,17 +1067,28 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  case GLX_ACCUM_BLUE_SIZE:
                  case GLX_ACCUM_ALPHA_SIZE:
                      if (value > 0) {
@@ -1242,7 +1667,7 @@ index 6684389..44f4f54 100644
                      }
                      break;
                  default:
-@@ -929,8 +1088,8 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -929,8 +1100,8 @@ namespace MobileGL::MG_Impl::GLXImpl {
          }
  
          int count = 0;
@@ -1253,7 +1678,7 @@ index 6684389..44f4f54 100644
                  ++count;
              }
          }
-@@ -948,9 +1107,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -948,9 +1119,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
              return nullptr;
          }
          int out = 0;
@@ -1266,7 +1691,7 @@ index 6684389..44f4f54 100644
              }
          }
          if (nelements) {
-@@ -962,17 +1121,33 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -962,17 +1133,33 @@ namespace MobileGL::MG_Impl::GLXImpl {
      }
  
      int GetFBConfigAttrib(Display* dpy, GLXFBConfigHandle config, int attribute, int* value) {
@@ -1304,7 +1729,7 @@ index 6684389..44f4f54 100644
          return ResolveVisual(dpy, -1);
      }
  
-@@ -1057,14 +1232,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1057,14 +1244,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
              EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
              EGL_NONE,
          };
@@ -1322,7 +1747,7 @@ index 6684389..44f4f54 100644
              return nullptr;
          }
          const EGLint attribs[] = {
-@@ -1076,14 +1251,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1076,14 +1263,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
              EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
              EGL_NONE,
          };
@@ -1340,7 +1765,50 @@ index 6684389..44f4f54 100644
              return nullptr;
          }
  
-@@ -1145,7 +1320,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1118,11 +1305,40 @@ namespace MobileGL::MG_Impl::GLXImpl {
+             }
+         }
+ 
+-        if (major < 1 ||
+-            (profileMask & ~(GLX_CONTEXT_CORE_PROFILE_BIT_ARB | GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB))) {
++        const Bool wantsEs = (profileMask & GLX_CONTEXT_ES_PROFILE_BIT_EXT) != 0;
++        const int desktopProfileBits =
++            profileMask & ~(GLX_CONTEXT_CORE_PROFILE_BIT_ARB | GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB |
++                            GLX_CONTEXT_ES_PROFILE_BIT_EXT);
++        if (major < 1 || desktopProfileBits != 0) {
+             return nullptr;
+         }
+ 
++        if (wantsEs) {
++            // "OpenGL ES on GLX"：ANGLE 的第一步就是这条路。上下文在 EGL 层建 ES（我们的 EGL 走
++            // 厂商 GLES），所以这里只把 client version 递下去。
++            //
++            // 共享要递下去：ANGLE 在 GLX 上开的是"两个 ES 上下文共享一个组"（一个渲染、一个负责
++            // display/readback）。早先这里一律传 nullptr，两个上下文各自成组，于是 canvas FBO 在 A
++            // 里画、在 B 里读，永远是空的（就是 WebGL 只有背景色的那个 bug）。跨 client API 不能
++            // 共享，所以只有 share 本身也是 ES 的时候才递。
++            const EGLint esAttribs[] = {
++                EGL_CONTEXT_CLIENT_VERSION,
++                major >= 3 ? 3 : 2,
++                EGL_NONE,
++            };
++            GLXContextHandle esShare = nullptr;
++            if (share) {
++                const auto* shareObject = TryGetContext(share);
++                if (shareObject != nullptr && shareObject->EsApi) esShare = share;
++            }
++            const auto esContext = CreateContextFromEGLAttribs(dpy, &info, esShare, esAttribs, true);
++            if (esContext != nullptr) {
++                MGLOG_I("glx: created an OpenGL ES %d context on GLX (profile mask 0x%x)", major >= 3 ? 3 : 2,
++                        profileMask);
++            }
++            return esContext;
++        }
++
+         Vector<EGLint> attribs = {
+             EGL_CONTEXT_MAJOR_VERSION,
+             major,
+@@ -1145,7 +1361,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
          }
          attribs.push_back(EGL_NONE);
  
@@ -1349,7 +1817,22 @@ index 6684389..44f4f54 100644
      }
  
      void DestroyContext(Display*, GLXContextHandle context) {
-@@ -1225,7 +1400,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1199,6 +1415,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
+             return 0;
+         }
+         t_current = {dpy, drawable, drawable, context};
++        // A fresh current drawable starts with a viewport that covers the whole surface. Leaving it
++        // at 0x0 (the previous drawable's size, or nothing at all) is invisible to programs that
++        // call glViewport themselves, but middle layers such as ANGLE read GL_VIEWPORT back and
++        // restore it: they would restore 0x0 and clip every later draw away.
++        if (surface->Width > 0 && surface->Height > 0) {
++            MG_Impl::GLImpl::Viewport(0, 0, static_cast<GLsizei>(surface->Width),
++                                      static_cast<GLsizei>(surface->Height));
++        }
+         return 1;
+     }
+ 
+@@ -1225,7 +1449,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
          }
          // What the window shows is the frame the swap finishes, read back while it is still the
          // drawable's content (only from the thread it is current to: the readback is a GL call).
@@ -1360,7 +1843,7 @@ index 6684389..44f4f54 100644
              PresentRemoteDrawable(drawable, it->second);
          }
          EGLImpl::SwapBuffers(it->second.Display, it->second.Surface);
-@@ -1240,14 +1417,66 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1240,14 +1466,66 @@ namespace MobileGL::MG_Impl::GLXImpl {
          SyncSurfaceSize(dpy, drawable, it->second, configured);
      }
  
@@ -1430,7 +1913,7 @@ index 6684389..44f4f54 100644
          // The GLXWindow is the X window itself; the EGL surface is created
          // lazily on the first MakeCurrent (same pattern as WGL's HWND cache).
          return window;
-@@ -1396,6 +1625,157 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1396,6 +1674,157 @@ namespace MobileGL::MG_Impl::GLXImpl {
          SwapIntervalEXT(nullptr, 0, interval);
          return 0;
      }
@@ -1694,6 +2177,59 @@ index 837d654..6e0c7c7 100644
              }
  
              void FreePixmap(Uint32 pixmap) override {
+diff --git a/MobileGL/MG_Impl/GLXImpl/X11WindowPresent.h b/MobileGL/MG_Impl/GLXImpl/X11WindowPresent.h
+new file mode 100644
+index 0000000..728b362
+--- /dev/null
++++ b/MobileGL/MG_Impl/GLXImpl/X11WindowPresent.h
+@@ -0,0 +1,47 @@
++// MobileGL - MobileGL/MG_Impl/GLXImpl/X11WindowPresent.h
++// Copyright (c) 2025-2026 MobileGL-Dev
++// Licensed under the GNU Lesser General Public License v3.0:
++//   https://www.gnu.org/licenses/gpl-3.0.txt
++//   https://www.gnu.org/licenses/lgpl-3.0.txt
++// SPDX-License-Identifier: LGPL-3.0-only
++// End of Source File Header
++
++#pragma once
++
++// EGL WINDOW SURFACES ON AN X SERVER.
++//
++// An X11 window is the same thing to present into whether its frames came from a GLX context or an
++// EGL one: a drawable the X server composites. So an EGL window surface on an X display attaches to
++// the very chain GLX uses (DRI3 + Present shared images, then MIT-SHM, then PutImage) instead of
++// growing a second copy of that logic. The frames come from the surface's own storage - the same
++// EGL surface the application draws into - through X11Present::Chain.
++//
++// Everything here is X11-only; Android and Wayland builds never see these entry points.
++
++#include <Includes.h>
++
++#if defined(__linux__) && !defined(__ANDROID__)
++
++namespace MobileGL::MG_Impl::GLXImpl::X11WindowPresent {
++    // The drawable geometry and depth of an X window, through libxcb/libX11 looked up at runtime
++    // (this library links neither). False when the handle is not an X window at all - the caller
++    // then leaves the surface alone instead of guessing.
++    Bool QueryGeometry(void* xDisplay, Uint64 window, Uint32* width, Uint32* height, Uint32* depth);
++
++    // An X display for a client that named none (EGL_DEFAULT_DISPLAY). Cached for the process; null
++    // when DISPLAY leads nowhere.
++    void* DefaultXDisplay();
++
++    // Attach an EGL window surface to the present chain of (xDisplay, window). The size is what the
++    // caller rendered into; the depth is the window's.
++    Bool Attach(EGLDisplay dpy, EGLSurface surface, void* xDisplay, Uint64 window, Uint32 width, Uint32 height,
++                Uint32 depth);
++
++    // Present the frame currently drawn into the attached surface. Called BEFORE the EGL swap: the
++    // chain copies what the draw framebuffer holds right now. False when nothing was attached.
++    Bool Present(EGLDisplay dpy, EGLSurface surface);
++
++    void Detach(EGLSurface surface);
++} // namespace MobileGL::MG_Impl::GLXImpl::X11WindowPresent
++
++#endif
 diff --git a/MobileGL/MG_Impl/GetProcAddress.cpp b/MobileGL/MG_Impl/GetProcAddress.cpp
 index 97a95af..f8c7f19 100644
 --- a/MobileGL/MG_Impl/GetProcAddress.cpp
@@ -1730,6 +2266,23 @@ index 97a95af..f8c7f19 100644
          MGLOG_D("GetProcAddress(%s) = nullptr!", name);
          return nullptr;
      }
+diff --git a/MobileGL/MG_Impl/Pipe/ShaderBufferEmit.h b/MobileGL/MG_Impl/Pipe/ShaderBufferEmit.h
+index 7474f89..7f82333 100644
+--- a/MobileGL/MG_Impl/Pipe/ShaderBufferEmit.h
++++ b/MobileGL/MG_Impl/Pipe/ShaderBufferEmit.h
+@@ -170,6 +170,12 @@ namespace MobileGL::MG_Pipe {
+                 // glBindBufferRange": BindingSlotRange1D keeps the flag precisely so GetRange()
+                 // can re-resolve a BASE binding against the object every time it is asked, and
+                 // that re-resolution is what must happen on the SERVER rather than here.
++                if (cls == 0 && i == 0 && std::getenv("MOBILEGL_SB_TRACE") != nullptr) {
++                    const auto probe = point.GetRange();
++                    MGLOG_E("sbtrace point=0 explicit=%d start=%lld end=%lld hasObj=%d",
++                            (int)point.HasExplicitRange(), (long long)probe.start, (long long)probe.end,
++                            (int)(object != nullptr));
++                }
+                 if (point.HasExplicitRange()) {
+                     const auto range = point.GetRange();
+                     entry.Offset = static_cast<Uint64>(range.start);
 diff --git a/MobileGL/MG_Remote/Server/SharedImageRegistry.cpp b/MobileGL/MG_Remote/Server/SharedImageRegistry.cpp
 index 5ae42c2..1ed1692 100644
 --- a/MobileGL/MG_Remote/Server/SharedImageRegistry.cpp
@@ -1799,6 +2352,130 @@ index 5ae42c2..1ed1692 100644
              image.Offset = 0;
              if (!FourccIsYuv(image.Fourcc)) {
                  image.Stride = described.stride * 4;
+diff --git a/MobileGL/MG_State/EGLState/Core.cpp b/MobileGL/MG_State/EGLState/Core.cpp
+index b975feb..2388f64 100644
+--- a/MobileGL/MG_State/EGLState/Core.cpp
++++ b/MobileGL/MG_State/EGLState/Core.cpp
+@@ -825,6 +825,11 @@ namespace MobileGL {
+                 if (!shareGroup) {
+                     shareGroup = MakeShared<GLState::ShareGroupState>(contextObject.ShareGroupToken);
+                 }
++                if (::getenv("MOBILEGL_GLX_TRACE")) MGLOG_I("eglctx: token=%llu shareCtx=%p found=%d group=%llu defer=%d api=%d",
++                        static_cast<unsigned long long>(contextObject.ClientContextToken), static_cast<void*>(shareCtx),
++                        shareCtx != nullptr && TryGetContext(shareCtx) != nullptr && TryGetContext(shareCtx)->GLStateObject != nullptr,
++                        static_cast<unsigned long long>(contextObject.ShareGroupToken), deferGLState ? 1 : 0,
++                        static_cast<int>(contextObject.ClientAPI));
+                 // P14 S3: the context's own GL state, sharing the objects (and the name spaces)
+                 // of the group above, with bindings, errors and the current program of its own.
+                 if (deferGLState) {
+diff --git a/MobileGL/MG_State/GLState/ErrorState/Error.cpp b/MobileGL/MG_State/GLState/ErrorState/Error.cpp
+index c2950c3..cd46bbc 100644
+--- a/MobileGL/MG_State/GLState/ErrorState/Error.cpp
++++ b/MobileGL/MG_State/GLState/ErrorState/Error.cpp
+@@ -7,12 +7,22 @@
+ // End of Source File Header
+ 
+ #include "Error.h"
++#include <cstdlib>
+ #include <algorithm>
+ #include <MG_Util/Converters/GLToStr/GLEnumConverter.h>
+ #include <MG_Util/Converters/MGToGL/ErrorCodeConverter.h>
+ 
+ namespace MobileGL::MG_State::GLState {
+     void ErrorState::RecordError(ErrorCode code, UniquePtr<ErrorInfo> info) {
++        // Trial switch: RecordError itself only speaks at Debug level, which Release builds compile
++        // out, so a stray GL_INVALID_VALUE during a draw leaves no trace of which check raised it.
++        // MOBILEGL_ERROR_TRACE=1 lifts every recorded error to Error level (its message names the
++        // function and the condition), and costs nothing when the variable is unset.
++        if (info != nullptr && std::getenv("MOBILEGL_ERROR_TRACE") != nullptr) {
++            MGLOG_E("Recorded GL error (%s): %s",
++                    MG_Util::ConvertGLEnumToString(MG_Util::ConvertErrorCodeToGLEnum(code)).c_str(),
++                    info->toString().c_str());
++        }
+         if (code == ErrorCode::NoError) {
+             MGLOG_D("Recording Non-OpenGL error:\n%s", info->toString().c_str());
+             m_nonGLErrors.push_back(MakeUnique<Error>(code, Move(info)));
+diff --git a/MobileGL/MG_State/GLState/ProgramState/ProgramObject.cpp b/MobileGL/MG_State/GLState/ProgramState/ProgramObject.cpp
+index 21f96e7..928c9cd 100644
+--- a/MobileGL/MG_State/GLState/ProgramState/ProgramObject.cpp
++++ b/MobileGL/MG_State/GLState/ProgramState/ProgramObject.cpp
+@@ -183,6 +183,7 @@ namespace MobileGL::MG_State::GLState {
+     Bool ProgramObject::BufferUniformWrite(const Uint location, const SizeT byteOffsetInUniform, const void* source,
+                                            const SizeT byteSize) {
+         if (source == nullptr || byteSize == 0) return true; // nothing to record, nothing to join for
++        const std::lock_guard<std::mutex> pendingLock(m_pendingUniformMutex);
+         if (m_pendingUniformBytes.size() + byteSize > kMaxBufferedUniformBytes) {
+             // Pressure valve: stop growing and let the caller take the join. Say so once per
+             // program, because the interesting fact is WHICH program did it.
+@@ -315,17 +316,21 @@ namespace MobileGL::MG_State::GLState {
+     }
+ 
+     void ProgramObject::ReplayBufferedUniformWrites() const {
+-        if (m_pendingUniformWrites.empty()) {
+-            m_pendingUniformBytes.clear();
+-            return;
+-        }
+-
+         // Drain into locals first: MarkUBOContentDirty below is a plain counter bump, but a
+         // future reader of this function should not be able to observe a half-drained buffer.
++        // The swap is taken under the lock the GL thread's BufferUniformWrite holds, because
++        // that thread is still allowed to append while this publish runs.
+         Vector<PendingUniformWrite> writes;
+         Vector<Uint8> bytes;
+-        writes.swap(m_pendingUniformWrites);
+-        bytes.swap(m_pendingUniformBytes);
++        {
++            const std::lock_guard<std::mutex> pendingLock(m_pendingUniformMutex);
++            if (m_pendingUniformWrites.empty()) {
++                m_pendingUniformBytes.clear();
++                return;
++            }
++            writes.swap(m_pendingUniformWrites);
++            bytes.swap(m_pendingUniformBytes);
++        }
+ 
+         if (m_spirv.globalUboScratch.empty() || m_spirv.uniformOffsets.empty()) {
+             // Phase B produced nothing (canceled at teardown, or a relink superseded it).
+@@ -377,8 +382,11 @@ namespace MobileGL::MG_State::GLState {
+             // every uniform to its initial value anyway (GL 4.6 core 7.6), and the other two
+             // callers are destruction and glProgramBinary's mandated failure, so there is
+             // nothing left that could want them.
+-            m_pendingUniformWrites.clear();
+-            m_pendingUniformBytes.clear();
++            {
++                const std::lock_guard<std::mutex> pendingLock(m_pendingUniformMutex);
++                m_pendingUniformWrites.clear();
++                m_pendingUniformBytes.clear();
++            }
+         }
+         if (!m_pendingLink) return;
+         m_pendingLink->Cancel();
+diff --git a/MobileGL/MG_State/GLState/ProgramState/ProgramObject.h b/MobileGL/MG_State/GLState/ProgramState/ProgramObject.h
+index edf5389..b5a96c5 100644
+--- a/MobileGL/MG_State/GLState/ProgramState/ProgramObject.h
++++ b/MobileGL/MG_State/GLState/ProgramState/ProgramObject.h
+@@ -8,6 +8,7 @@
+ 
+ #pragma once
+ #include <Includes.h>
++#include <mutex>
+ #include "ShaderObject.h"
+ #include "ProgramArtifacts.h"
+ 
+@@ -1526,5 +1527,13 @@ namespace MobileGL::MG_State::GLState {
+         // uniforms are not the previous link's uniforms).
+         mutable Vector<PendingUniformWrite> m_pendingUniformWrites;
+         mutable Vector<Uint8> m_pendingUniformBytes;
++        // Guards the two buffers above ACROSS THREADS. The GL thread appends while the SPIR-V
++        // job is pending (BufferUniformWrite), and the publish that ends that window drains them
++        // (ReplayBufferedUniformWrites does two vector swaps). Without this, a program that is
++        // linked and immediately given uniforms - which is every engine that sets uniforms right
++        // after glLinkProgram, and every fast probe - races the publish: the swap reallocates the
++        // vector under the writer, and the heap is corrupted a memcpy later. CancelLink clears
++        // them from a third path (teardown/relink), so it takes the same lock.
++        mutable std::mutex m_pendingUniformMutex;
+     };
+ } // namespace MobileGL::MG_State::GLState
 diff --git a/MobileGL/MG_Util/Converters/GLToMG/TextureEnumConverter.cpp b/MobileGL/MG_Util/Converters/GLToMG/TextureEnumConverter.cpp
 index d974396..a2581d6 100644
 --- a/MobileGL/MG_Util/Converters/GLToMG/TextureEnumConverter.cpp
@@ -1845,11 +2522,52 @@ index d974396..a2581d6 100644
              case GL_R8_SNORM:
                  return TextureInternalFormat::R8Snorm;
              case GL_R16:
+diff --git a/MobileGL/MG_Util/ShaderTranspiler/ShaderCompiler.cpp b/MobileGL/MG_Util/ShaderTranspiler/ShaderCompiler.cpp
+index 91e83bd..9c3777d 100644
+--- a/MobileGL/MG_Util/ShaderTranspiler/ShaderCompiler.cpp
++++ b/MobileGL/MG_Util/ShaderTranspiler/ShaderCompiler.cpp
+@@ -16,6 +16,7 @@
+ #include <format>
+ 
+ #include <cmath>
++#include <cstdio>
+ 
+ #include "SpirvPasses/EliminateFloatEqualsZeroPass.h"
+ #include "SpirvPasses/FlattenInterfaceStructPass.h"
+@@ -398,6 +399,28 @@ namespace MobileGL {
+ 
+             Result<SharedPtr<glslang::TShader>> ShaderCompiler::CompileShader(const ShaderAttrib& attrib) {
+                 auto shaderType = attrib.shaderType;
++                if (const char* magmaTrace = std::getenv("MOBILEGL_MAGMA_TRACE");
++                    magmaTrace != nullptr && magmaTrace[0] == '1') {
++                    const std::string_view view(attrib.sourceStr.data(), attrib.sourceStr.size());
++                    std::string cut(view.substr(0, 320));
++                    for (char& c : cut)
++                        if (c == '\n') c = '|';
++                    MGLOG_I("magmatrace: shader type=0x%x len=%d src=[%s]", static_cast<Uint32>(shaderType),
++                            static_cast<Int>(view.size()), cut.c_str());
++                }
++
++                // 把 ANGLE 实际递过来的源码整段落盘：GLX 模式下它发的是桌面 GLSL 450，
++                // 只有拿到全文才能在本机用探针复现"画不出片元"的现象，不必反复开浏览器。
++                if (const char* dumpDir = std::getenv("MOBILEGL_SHADER_DUMP");
++                    dumpDir != nullptr && dumpDir[0] != '\0') {
++                    const String path = String(dumpDir) + "/shader-" +
++                                        std::to_string(static_cast<Uint32>(shaderType)) + "-" +
++                                        std::to_string(static_cast<Uint64>(attrib.sourceStr.size())) + ".glsl";
++                    if (FILE* dump = std::fopen(path.c_str(), "wb"); dump != nullptr) {
++                        std::fwrite(attrib.sourceStr.data(), 1, attrib.sourceStr.size(), dump);
++                        std::fclose(dump);
++                    }
++                }
+ 
+                 auto lang = MG_Util::ConvertGLEnumToEShLanguage(shaderType);
+                 if (lang == EShLanguage::EShLangCount) {
 diff --git a/MobileGL/MG_Util/ShaderTranspiler/ShaderSourceProcessor.cpp b/MobileGL/MG_Util/ShaderTranspiler/ShaderSourceProcessor.cpp
-index 5d0f945..2efdff0 100644
+index 5d0f945..ab54de2 100644
 --- a/MobileGL/MG_Util/ShaderTranspiler/ShaderSourceProcessor.cpp
 +++ b/MobileGL/MG_Util/ShaderTranspiler/ShaderSourceProcessor.cpp
-@@ -1630,6 +1630,33 @@ namespace {
+@@ -1630,6 +1630,51 @@ namespace {
      // tracker rather than a bare offset because this pass rewrites identifiers first, and those
      // rewrites are raw text: a leading comment banner mentioning `varying` or `texture2D` moves the
      // anchor, and the tracker notices.
@@ -1880,10 +2598,28 @@ index 5d0f945..2efdff0 100644
 +        source.insert(afterVersion.Get(source), declarations);
 +    }
 +
++    // 判断源码里是否**独立**出现某个标识符。纯 find 会把 `webgl_FragColor` 里的尾巴当成
++    // `gl_FragColor`：ANGLE 的桌面 GL 后端就是这样命名它的输出变量（它自己做过一轮翻译，
++    // 源码里根本没有 gl_FragColor），我们却因此多插了一个 location 0 的 mg_FragColor，
++    // 真正的写入落到 location 1 上、被只有一个颜色附件的 FBO 丢掉 —— 画面上就是"draw 执行
++    // 了但没有片元"。这里要求命中点的左右都不是标识符字符。
++    bool HasStandaloneIdentifier(const MobileGL::String& source, const MobileGL::String& name) {
++        const auto isIdentifierChar = [](char c) {
++            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
++        };
++        for (SizeT pos = source.find(name); pos != MobileGL::String::npos; pos = source.find(name, pos + 1)) {
++            const bool leftOk = pos == 0 || !isIdentifierChar(source[pos - 1]);
++            const SizeT end = pos + name.size();
++            const bool rightOk = end >= source.size() || !isIdentifierChar(source[end]);
++            if (leftOk && rightOk) return true;
++        }
++        return false;
++    }
++
      void ModernizeLegacyGLSL(MobileGL::ShaderStage stage, MobileGL::String& source, AfterVersionAnchor& afterVersion) {
          // Precision qualifiers (highp/mediump/lowp and default-precision statements) are legal and
          // ignored in the normalized desktop core profiles, so glslang handles them natively.
-@@ -1642,21 +1669,31 @@ namespace {
+@@ -1642,21 +1687,30 @@ namespace {
          if (stage == MobileGL::ShaderStage::Vertex) {
              ReplaceIdentifier(source, "attribute", "in");
              ReplaceIdentifier(source, "varying", "out");
@@ -1893,13 +2629,13 @@ index 5d0f945..2efdff0 100644
  
          if (stage == MobileGL::ShaderStage::Fragment) {
              ReplaceIdentifier(source, "varying", "in");
-             const bool usesFragColor = source.find("gl_FragColor") != MobileGL::String::npos;
+-            const bool usesFragColor = source.find("gl_FragColor") != MobileGL::String::npos;
 -            const bool usesFragData = source.find("gl_FragData") != MobileGL::String::npos;
++            const bool usesFragColor = HasStandaloneIdentifier(source, "gl_FragColor");
 +            // 只认真正的下标访问：`#define love_Canvases gl_FragData` 这种别名只是宏定义，
 +            // 展开后一个符号都不引用，为它声明 8 个输出反而会把 mg_FragColor 挤到 location 8，
 +            // 撞上 GL_MAX_DRAW_BUFFERS=8（LOVE 0.10 就是这么被拒的）。
-+            const bool usesFragData = source.find("gl_FragData[") != MobileGL::String::npos ||
-+                                      source.find("gl_FragData [") != MobileGL::String::npos;
++            const bool usesFragData = HasStandaloneIdentifier(source, "gl_FragData");
              if (usesFragColor) {
                  ReplaceIdentifier(source, "gl_FragColor", "mg_FragColor");
 -                source.insert(afterVersion.Get(source), "out vec4 mg_FragColor;\n");

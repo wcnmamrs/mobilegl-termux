@@ -50,14 +50,14 @@ OpenGL core profile version string: 4.6.0 MobileGL 26.11-dev, Direct (Vulkan) Ba
 ## 目录
 
 ```
-patches/mobilegl-compat.patch   上游 MobileGL 的全部改动（15 文件，+1252/−116）
+patches/mobilegl-compat.patch   上游 MobileGL 的全部改动（31 文件，+1634/−135）
 scripts/                        服务端、启动器、体检、系统级安装、桌面启动
 extras/                         GL1.x 兼容层 / 关垂直同步 / GetProcAddress 诊断（LD_PRELOAD）
 examples/                       EGL X11 窗口表面探针、桌面 GL 上下文探针
 docs/GUIDE.md                   从零编译的完整指南（含 25 条踩坑总表）
 docs/NOTES.md                   调试笔记与逐项实测数据（很长，按需查）
-docs/reference/                 逆向参考：termux-x11 的 lorie/dri3.c、renderer.c，ANGLE DisplayGLX.cpp
-shots/                          实拍证据（Chromium / mpv / 三个游戏 / 通道顺序校验）
+docs/reference/                 逆向参考（仅许可允许再分发的：ANGLE DisplayGLX.cpp；GPL 文件不随仓库分发，见 docs/reference/README.md）
+shots/                          实拍证据（Chromium / mpv / DRI3 通道顺序校验；不含游戏画面）
 ```
 
 ---
@@ -180,7 +180,7 @@ bash ~/mgl/gpu-check.sh 程序名      # 用完整 GPU 环境跑任意程序
 | `mgl-run.sh` | 通用启动器：先 ensure-server，再带着完整环境进容器跑任意命令 |
 | `install-system.sh` | 把库和配置装进容器（`/opt/mobilegl`、glvnd JSON、`/etc/profile.d`、`/etc/mobilegl/client.conf`、`/etc/chromium.d`）；`remove` 卸载 |
 | `gpu-check.sh` | 四段体检；`gpu-check.sh <程序>` 用完整环境跑单个程序 |
-| `switch.sh` | `mobilegl` / `virpipe` / `status` / `ensure` / `desktop` / `bench` |
+| `switch.sh` | `mobilegl` / `virpipe` / `status` / `ensure` / `desktop` / `bench`（`virpipe` 需要自行 `pkg install virglrenderer-android angle-android`）|
 | `legacy.sh` | 带 GL1.x 兼容层跑老程序 |
 | `xfce.sh` / `xfce-d.sh` | 起 / 停整台桌面（在 `~/mgl/` 里，不在 `$HOME` 放软链）|
 
@@ -254,7 +254,13 @@ bash ~/mgl/gpu-check.sh 程序名      # 用完整 GPU 环境跑任意程序
 
 ## 许可
 
-本仓库的脚本与补丁：MIT（见 `LICENSE`）。
-上游项目：[MobileGL](https://github.com/MobileGL-Dev/MobileGL)（LGPL-3.0）、
-[Termux:X11](https://github.com/termux/termux-x11)、[libglvnd](https://gitlab.freedesktop.org/glvnd/libglvnd)、
-[ANGLE](https://chromium.googlesource.com/angle/angle)。`docs/reference/` 下的文件仅作分析参考，版权归各自作者。
+| 部分 | 许可 |
+|---|---|
+| 本仓库的脚本、文档、`extras/`、`examples/` | MIT（见 `LICENSE`） |
+| `patches/mobilegl-compat.patch` 与载荷里的 `libMobileGL.so` | 衍生自 [MobileGL](https://github.com/MobileGL-Dev/MobileGL)，**LGPL-3.0** |
+| `docs/reference/DisplayGLX.cpp` | [ANGLE](https://chromium.googlesource.com/angle/angle) BSD-3-Clause（保留版权声明） |
+
+载荷里的二进制是对 MobileGL 的修改版，**对应源码** = 上游 commit `2bdbe05` + `patches/mobilegl-compat.patch`
+（`docs/GUIDE.md` 有完整重建步骤）；LGPL-3.0 要求的源码可得性由此满足。
+其它上游：[Termux:X11](https://github.com/termux/termux-x11)（GPL-3.0，其源码文件不随本仓库分发）、
+[libglvnd](https://gitlab.freedesktop.org/glvnd/libglvnd)、[Mesa](https://gitlab.freedesktop.org/mesa/mesa)（仅运行时依赖）。
