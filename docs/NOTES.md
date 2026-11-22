@@ -363,12 +363,20 @@ MGL_NOVSYNC=1 ~/mgl/mgl-run.sh glmark2 -s 800x600
 
 ### 用法
 ```sh
-# 桌面会话里直接跑（env.sh 已由 xfce.sh 注入）
-chromium-gpu                      # = /usr/local/bin/chromium-gpu，封装了下列三个开关
-chromium-gpu --app=https://example.com
+# 桌面会话里直接跑（env.sh 已由 xfce.sh 注入）；后端由 /etc/chromium.d/50-mobilegl 决定
+chromium
+chromium --app=https://example.com
 ```
-开关：`--use-gl=angle --use-angle=gl --ignore-gpu-blocklist`（外加容器必需的 `--no-sandbox --disable-dev-shm-usage`）。
-开始菜单的 Chromium 已指向同一个封装（原文件备份成 `chromium.desktop.orig-mobilegl`）。
+开关写在 `/etc/chromium.d/50-mobilegl`（唯一事实来源）：
+`--use-gl=angle --use-angle=gles --ignore-gpu-blocklist --no-sandbox --disable-dev-shm-usage`。
+
+> **`--use-angle=gles` 不能换成 `gl`。** ANGLE 的桌面 GL 后端在 Linux 走 GLX：上下文能创建、
+> `glClear` 也生效，但 `glDrawArrays` 的几何**不落进 canvas**（`readPixels=0,0,0,255`），
+> 所有真 3D 站点因此空白。换 GLES 后端后 `readPixels=0,255,0,255`，get.webgl.org 正常出立方体。
+>
+> `/usr/local/bin/chromium-gpu` 现在**只做透传**（`exec /usr/bin/chromium "$@"`）。早先它自己也写了一套
+> `--use-angle=gl`，与 `chromium.d` 里的旗标打架——两套旗标谁生效取决于 Chromium 的解析顺序，
+> 于是同一个浏览器有时候能画、有时候报 `BindToCurrentSequence failed`。现在只留一处。
 
 ### 实测
 WebGL 渲染器串：`ANGLE (MobileGL-Dev (BZLZHH Swung0x48 Tungsten), Magma (MobileGL Core) (Mali-G57 MC2 Vulkan 1.1.177 Driver 32.1.0), OpenGL 4.6.0)`
