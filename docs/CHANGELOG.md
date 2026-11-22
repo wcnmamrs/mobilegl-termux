@@ -12,6 +12,15 @@
   修法：两行合成一个多行字符串；并在安装阶段加自检（缺 `unset __GLX_VENDOR_LIBRARY_NAME`
   或 `--use-angle=gles` 就直接 `[E]` 并退出 5，不再"装完看起来 OK"）。
 
+## v1.0.4 — 2026-11-23
+
+- 修复 `--uninstall` 会把 `~/xfce.sh` 恢复成**悬空软链**的问题：
+  `backup_once` 早先用 `cp -a`，遇到软链会把"链接本身"存下来；卸载时先删 `$MGL_HOME/*.sh`，
+  再把链接恢复回去，于是 `~/xfce.sh` 指向一个已删除的文件。
+  现在备份的是**真内容**（`cp -L`），并且 `~/xfce.sh` 与 `~/xfce-d.sh` 都会恢复成普通文件。
+- 已是指向本工具链的软链不再被当作"用户的文件"备份。
+- 载荷内容与 v1.0.3 相同（sha256 `f20a2304303cf367eae58f8567de78924d922e00b7bb9718ee7efa72e5d9fc2f`）。
+
 ## v1.0.3 — 2026-11-23
 
 - 修复：片元着色器输出被误判。`ShaderSourceProcessor` 用纯文本查找 `gl_FragColor`，

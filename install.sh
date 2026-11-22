@@ -25,7 +25,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-VERSION="1.0.3"
+VERSION="1.0.4"
 REPO_OWNER="wcnmamrs"
 REPO_NAME="mobilegl-termux"
 PAYLOAD_FILE="mobilegl-payload-arm64-v${VERSION}.tar.xz"
@@ -127,14 +127,21 @@ write_file_atomic() {  # <目标> <内容>
 
 record() { printf '%s\n' "$1" >>"$MANIFEST"; }
 
-backup_once() {  # <文件> —— 第一次触碰时留一份
+backup_once() {  # <文件> —— 第一次触碰时留一份**真内容**
     local f="$1" name
-    [ -e "$f" ] || return 0
+    [ -e "$f" ] || [ -L "$f" ] || return 0
     name=$(printf '%s' "$f" | tr '/' '_')
     [ -e "$BACKUP_DIR/$name" ] && return 0
     mkdir -p "$BACKUP_DIR"
-    cp -a "$f" "$BACKUP_DIR/$name"
-    dim "备份 $f → $BACKUP_DIR/$name"
+    # 如果它已经是指向本工具链的软链，那不是用户的文件，没什么可备份的。
+    if [ -L "$f" ]; then
+        case "$(readlink -f "$f" 2>/dev/null)" in "$MGL_HOME"/*) return 0 ;; esac
+    fi
+    # 关键：用 -L 取真实内容，而不是 cp -a 把软链本身存下来。
+    # 早先这里用 cp -a，备份下来的是个软链；卸载时先删掉 $MGL_HOME/*.sh，
+    # 再把软链"恢复"回去，结果 ~/xfce.sh 变成一个指向已删文件的悬空链接。
+    cp -L "$f" "$BACKUP_DIR/$name" || { err "备份 $f 失败"; return 1; }
+    dim "备份 $f → $BACKUP_DIR/$name（$(wc -c <"$BACKUP_DIR/$name" | tr -d ' ') 字节）"
 }
 
 usage() { sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -619,11 +626,25 @@ uninstall_all() {
         rm -f "$HOME/.termux/boot/mobilegl-server.sh"; ok "已删开机自启"
     fi
 
-    # 恢复备份（用户原本的脚本）
-    if [ -f "$BACKUP_DIR/_data_data_com.termux_files_home_xfce.sh" ]; then
-        cp -a "$BACKUP_DIR/_data_data_com.termux_files_home_xfce.sh" "$HOME/xfce.sh"
-        ok "已恢复你原来的 ~/xfce.sh"
-    fi
+    # 恢复备份（用户原本的脚本）：两个启动器都要恢复，且必须是真文件不是悬空软链
+    local b
+    for b in xfce.sh xfce-d.sh; do
+        if [ -f "$BACKUP_DIR/_data_data_com.termux_files_home_$b" ]; then
+            cp -a --remove-destination "$BACKUP_DIR/_data_data_com.termux_files_home_$b" "$HOME/$b"
+            if [ -f "$HOME/$b" ] && [ ! -L "$HOME/$b" ]; then
+                ok "已恢复你原来的 ~/$b（$(wc -c <"$HOME/$b" | tr -d ' ') 字节）"
+            else
+                err "恢复 ~/$b 后仍不是普通文件，请检查 $BACKUP_DIR"
+            fi
+        fi
+    done
+    # 备份里存的若是我们自己的旧软链（v1.0.3 及更早的备份），别拿它去恢复
+    for b in xfce.sh xfce-d.sh; do
+        if [ -L "$HOME/$b" ] && [ ! -e "$HOME/$b" ]; then
+            rm -f "$HOME/$b"
+            info "~/$b 是旧的悬空软链，已删除（原始脚本备份在 $BACKUP_DIR）"
+        fi
+    done
 
     rm -rf "$MGL_HOME/lib" "$MGL_HOME"/*.sh "$MGL_HOME/.cache"
     ok "Termux 侧脚本与载荷缓存已清理（日志与备份保留在 $MGL_HOME）"
