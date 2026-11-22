@@ -374,6 +374,26 @@ chromium --app=https://example.com
 > `glClear` 也生效，但 `glDrawArrays` 的几何**不落进 canvas**（`readPixels=0,0,0,255`），
 > 所有真 3D 站点因此空白。换 GLES 后端后 `readPixels=0,255,0,255`，get.webgl.org 正常出立方体。
 >
+### 为什么这是"配置"而不是"给 Chromium 打补丁"
+
+坑在**环境变量**上，不在应用里：`/etc/profile.d/mobilegl.sh` 为了让 GLX 程序走 MobileGL 而导出
+`__GLX_VENDOR_LIBRARY_NAME=mobilegl`，而 Chromium 初始化 GL 时第一件事是"在 GLX 上开 OpenGL ES"。
+我们的 GLX 层原先不声明 `GLX_EXT_create_context_es_profile`，这一下失败会连带整条 `eglInitialize`
+返回 `EGL_NOT_INITIALIZED`，WebGL 于是拿不到 context（页面显示 `BindToCurrentSequence failed`）。
+
+已经做过的两层处理：
+
+| 层 | 做法 | 效果 |
+|---|---|---|
+| 库（真·通用） | 给 GLX 层补上 `GLX_EXT_create_context_es_profile` / `_es2_profile` 与 `GLX_CONTEXT_PROFILE_MASK_ARB` 里的 ES 位（`GLXImpl.cpp` `CreateContextAttribsARB` 分派到 EGL 的 ES 上下文） | "要 ES on GLX"的程序不再整链失败；实测 `glXQueryExtensionsString` 已含该扩展，Chromium 也不再报 `Cannot create an OpenGL ES platform on GLX` |
+| 配置（按程序） | `/etc/chromium.d/50-mobilegl` 里 `unset __GLX_VENDOR_LIBRARY_NAME` | Chromium 改走 EGL/ANGLE-GLES：`readPixels=0,255,0,255`，aquarium 正常出画面 |
+
+**为什么库层修好了还要保留这行配置**：ES 上下文能建出来之后，ANGLE 的 **GLX 绘制路径**依然
+画不进 canvas（同一张 shader 三角形，`readPixels` 只读到 clear 色 `255,0,0,255`；"几何不落进
+canvas"就是早先 `--use-angle=gl` 那个症状）。也就是说 GLX 这条路的问题从"初始化就死"退到了
+"能跑但画不出来"，要彻底通用还得修 GLX drawable 的绘制路径。在那之前，Chromium 用 EGL 是对的，
+这行 `unset` 只影响 Chromium 自己，桌面里其它程序的 GLX 照旧走 MobileGL。
+
 > **桌面会话里必须 `unset __GLX_VENDOR_LIBRARY_NAME`。** 这个变量由 `/etc/profile.d/mobilegl.sh` 设成
 > `mobilegl`，让 GLX 程序走我们的 GLX 层——但 Chromium 的 GL 初始化会先尝试 "GLX 上的 OpenGL ES"，
 > 而我们的 GLX 层没有 `GLX_EXT_create_context_es_profile`，于是这条尝试失败并连带整条 EGL 初始化链

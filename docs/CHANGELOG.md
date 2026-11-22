@@ -1,5 +1,11 @@
 # 变更记录
 
+- **GLX 层补 `GLX_EXT_create_context_es_profile`**（库改动，随载荷发布；本次只进源码树）：
+  `GLX_CONTEXT_PROFILE_MASK_ARB` 里的 ES 位现在会分派到 EGL 的 ES 上下文（`BindAPI(EGL_OPENGL_ES_API)`
+  + `EGL_OPENGL_ES2_BIT`）。效果：Chromium 不再因为在 GLX 上建不出 ES 上下文而整链 `eglInitialize`
+  失败；但 ANGLE 的 GLX **绘制**路径仍画不进 canvas（只有 clear 色），所以 Chromium 继续用
+  `--use-angle=gles` + `unset __GLX_VENDOR_LIBRARY_NAME` 走 EGL。
+
 - **install.sh 真 bug（实机全卸载重装时发现）**：`write_file_atomic` 只接受一个内容参数，
   写 `/etc/chromium.d/50-mobilegl` 时却传了两个字符串，`printf '%s\n' "$2"` 只落第一个，
   `CHROMIUM_FLAGS` 那行被静默丢弃 → 浏览器退回默认后端、WebGL 全废。
