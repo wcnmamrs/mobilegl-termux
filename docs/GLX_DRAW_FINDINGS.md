@@ -85,3 +85,48 @@ es-3.0      err_draw=0x0    centre=0,255,0,255   ✅
 补充结论：
 - `BuildVertices`/`glXMakeCurrent` 之后 `GL_VIEWPORT` 仍是 `0,0 0x0`（真 bug，未修）；但后端在 viewport 宽高为 0 时会退化成逻辑分辨率，所以探针仍能画出来 —— 真实程序若查询 `GL_VIEWPORT` 再据此计算，可能出问题。
 - 直到这一轮为止，**我们的 GL 层在每一条可构造的路径上都正确**；ANGLE 在 GLX 模式下丢失 WebGL 内容这件事，无法再用"某个 GL 入口坏了"解释，下一步只能进 ANGLE 内部（`RendererGL`/`StateManagerGL` 的调用序列）或给我们自己的 GLX 层加"每次 draw 的 FBO/drawable 记录"来对照。
+
+## 追加实验三（2026-11-22 21:50）—— **找到根因：共享上下文不共享对象**
+
+加了 `MOBILEGL_GLX_TRACE=1` 的 per-draw 记录（`MG_Impl/GLImpl/Drawing/GL_Drawing.cpp` 里打 FBO id / viewport / scissor），
+并给 `ReadPixels` 也加了同样的记录（`MG_Impl/GLImpl/Framebuffer/GL_Framebuffer.cpp`）。带
+`__GLX_VENDOR_LIBRARY_NAME=mobilegl` 跑 tri3，日志给出决定性两行：
+
+```
+glxtrace: DrawArrays mode=0x4 first=0 count=3 fbo=2 vp=0,0,200,200   ← 页面三角形，画进了 fbo=2
+glxtrace: ReadPixels 1x1 at 100,100 fbo=2 first=255,0,0,255          ← 紧接着读同一 fbo，只有底色
+```
+
+即：**绘制确实发生了、目标 FBO 也对，但读回来是空的**。于是逐个排除同形状的写法：
+
+| 探针 | 内容 | 结果 |
+|---|---|---|
+| `glxprobe18` | 单采样渲染缓冲 FBO / 多采样 FBO 直读 / 解析后读 / `glDrawBuffers` 后画 | 单采样 ✅、MSAA 直读按规范报 `0x502`、解析后 ✅ |
+| `glxprobe19` | `glDrawBuffers([ATTACH0])`、`glDrawBuffer`、`glNamedFramebufferDrawBuffer[s]` 之后绘制 | 五种写法全部 ✅，排除 draw buffer 问题 |
+| **`glxprobe20`** | **两个共享上下文（`glXCreateContextAttribsARB(dpy, cfg, shareContext, …)`）操作同一个纹理附件 FBO** | **看到问题** ↓ |
+
+`glxprobe20` 输出：
+```
+ctx A draw, ctx A read             centre=0,255,0,255 err=0x0     ✅
+ctx B read same fbo (share)        centre=0,0,0,0     err=0x502   ← B 眼里这个 FBO 根本没有附件
+ctx B draw, ctx B read             centre=0,0,0,0     err=0x0     ← B 画的也进不去
+ctx A read after B draw            centre=0,255,0,255 err=0x0     ← A 仍看到自己的旧内容
+```
+
+**结论：split 模式下共享上下文（share group）里的对象没有真正共享。** 每个上下文在服务端是独立会话，
+纹理/FBO/缓冲的名字空间互相看不见；客户端也没有把共享对象镜像到对方会话。
+
+这正好解释 ANGLE 的现象：ANGLE 的 GL 后端会开**两个共享上下文**（一个做渲染、一个负责 display/readback），
+WebGL 的 canvas FBO 在 A 里画、在 B 里读 → 永远是空的，而 clear 色因为两边各自清过所以"看起来正常"。
+EGL 模式下 WebGL 能用，是因为 ANGLE 走的是单上下文路径（或共享对象只在同一上下文内被读写）。
+
+### 修的方向（下一轮）
+1. `MobileGL/MG_State/GLState/ShareGroupState.*` 已有 share-group 概念，检查前端是否把"同一 share group 的上下文"登记到一起；
+2. split 传输层：`MG_Remote/Client/*` 里对象 id 目前按会话编码，需要改成"共享组内同一逻辑 id 在多会话内路由"，
+   或者让服务端为同一 share group 的会话共享一份对象表；
+3. 拿 `glxprobe20` 作为回归用例（四个断言全部为绿才算修好）。
+
+### 顺带修掉的真 bug（已编译部署）
+- `glXMakeCurrent` 成功后把 viewport 初始化成 drawable 的逻辑尺寸（`GLXImpl.cpp`），
+  之前是 `0,0 0x0`；`glxprobe15` 复查：`viewport 0,0,320,240 -> vp=0,0,320,240` ✅
+- per-draw / per-readpixels 诊断日志，`MOBILEGL_GLX_TRACE=1` 打开（默认关闭，零开销）
