@@ -1,5 +1,11 @@
 # 变更记录
 
+- **install.sh 真 bug（实机全卸载重装时发现）**：`write_file_atomic` 只接受一个内容参数，
+  写 `/etc/chromium.d/50-mobilegl` 时却传了两个字符串，`printf '%s\n' "$2"` 只落第一个，
+  `CHROMIUM_FLAGS` 那行被静默丢弃 → 浏览器退回默认后端、WebGL 全废。
+  修法：两行合成一个多行字符串；并在安装阶段加自检（缺 `unset __GLX_VENDOR_LIBRARY_NAME`
+  或 `--use-angle=gles` 就直接 `[E]` 并退出 5，不再"装完看起来 OK"）。
+
 ## v1.0.2 之后的脚本修正（续）
 
 - **Chromium 在桌面会话里报 `BindToCurrentSequence failed` 的根因**：会话继承了

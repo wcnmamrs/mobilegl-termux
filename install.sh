@@ -401,10 +401,19 @@ MOBILEGL_IPC_PROBE_TIMEOUT_MS=250'
 
     # 6. Chromium（Debian 包读 /etc/chromium.d/*）
     write_file_atomic "$PROOT_DIR/etc/chromium.d/50-mobilegl" \
-        'unset __GLX_VENDOR_LIBRARY_NAME' \
-        'CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-gl=angle --use-angle=gles --ignore-gpu-blocklist --no-sandbox --disable-dev-shm-usage"'
+'unset __GLX_VENDOR_LIBRARY_NAME
+CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-gl=angle --use-angle=gles --ignore-gpu-blocklist --no-sandbox --disable-dev-shm-usage"'
     record "$PROOT_DIR/etc/chromium.d/50-mobilegl"
     ok "Chromium 旗标 → /etc/chromium.d/50-mobilegl"
+
+    # 6a. 自检：Chromium 的两个关键行必须真的写进去了。write_file_atomic 只接受一个内容参数，
+    #     早先这里传了两个参数，结果旗标行被静默丢弃——浏览器于是退回默认后端，WebGL 全废。
+    local chromium_cfg="$PROOT_DIR/etc/chromium.d/50-mobilegl"
+    if ! grep -q '^unset __GLX_VENDOR_LIBRARY_NAME$' "$chromium_cfg" 2>/dev/null ||
+       ! grep -q -- '--use-angle=gles' "$chromium_cfg" 2>/dev/null; then
+        err "Chromium 配置写入不完整：$chromium_cfg（缺 unset 或 --use-angle=gles）"
+        return 5
+    fi
 
     # 6b. GL 1.x 兼容包装器：Magma（Vulkan 后端）把 glBegin/glVertex*/显示列表实现成空 stub，
     #     老程序直接跑会得到黑窗口。legacy 通过 LD_PRELOAD 把立即模式翻译成 VBO + 着色器。
