@@ -60,6 +60,42 @@ shots/                          实拍证据（Chromium / mpv / 三个游戏 / �
 
 ---
 
+## 它装什么，装完怎么验
+
+安装脚本做四件事，全部可重入、失败自动回滚：
+
+1. **自检**：架构（只认 aarch64）、Termux 环境、proot 容器、必需命令、磁盘余量、
+   容器里是否已有 `libGL/libGLX/libEGL`（缺了自动 apt 装）、`termux-x11` 是否存在。
+2. **取载荷并三重校验**：整包 `sha256` → 包内 `MANIFEST.sha256` → 逐文件 `sha256sum -c`。
+   三个下载源（GitHub 直连 + 两个镜像）依次重试，本地包可用 `--payload` 指定。
+3. **装两侧**：
+   - Termux：`~/mgl/`（12 个脚本、兼容层、服务端二进制、库）、`~/xfce.sh`+`~/xfce-d.sh` 软链、Termux:Boot 自启。
+   - 容器：`/opt/mobilegl/lib/libMobileGL.so`、glvnd EGL 描述、`libGLX_mobilegl.so.0`、
+     `/etc/profile.d/mobilegl.sh`、`/etc/environment.d/10-mobilegl.conf`、
+     `/etc/mobilegl/client.conf`、`/etc/chromium.d/50-mobilegl`、`ldconfig`。
+4. **实测验收**：先让服务端应答，然后**同时**验 GLX（`glxinfo -B`）与 EGL（`es2_info`），
+   两条路都必须报出 `Magma (MobileGL Core)`。没有运行中的 X 时，脚本会临时起一个
+   display，验完立刻关掉。任一条不通过 → 判定失败 → 自动回滚。
+
+`--uninstall` 按安装清单逐项删除，删完再校验一遍容器里是否还有残留。
+
+### 实测（本机，TFY-AN00 / Mali-G57 MC2 / Android 12）
+
+删掉旧安装 → 把源码树整个藏起来 → 只跑安装脚本：
+
+```
+== 启动 GPU 服务端（Termux 侧） ==
+[OK] 服务端二进制 → /data/data/com.termux/files/home/mgl/lib/libMobileGLServer.so（16M）
+[OK] server: ready (endpoint=@mobilegl pidfile=9798)
+== 验证（GLX + EGL 两条路） ==
+[OK] GLX → Magma (MobileGL Core) (Mali-G57 MC2, Vulkan 1.1.177, Driver 32.1.0)
+[OK] EGL → Magma (MobileGL Core) (Mali-G57 MC2, Vulkan 1.1.177, Driver 32.1.0)
+== 安装完成 ==
+```
+
+服务端进程确认跑的是 `~/mgl/lib/libMobileGLServer.so` —— 也就是说**用户机器上不需要源码、
+不需要编译器、不需要 NDK**。
+
 ## 快速开始
 
 装好 Termux 基础件（`proot-distro`、一个 Debian 容器、`termux-x11` 可选），然后一条命令：
