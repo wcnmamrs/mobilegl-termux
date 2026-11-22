@@ -1,15 +1,18 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
-# 按可执行文件名精确杀进程。
+# 按名字精确杀进程：先看 /proc/<pid>/exe 的基本名，再看 /proc/<pid>/comm。
 # 为什么不用 pkill -f：它匹配整条命令行，会把"命令行里恰好含有这个名字"的 shell 一起杀掉
-# （实测过一次：卸载脚本把自己的父 shell 打成 SIGKILL）。
+# （实测踩到过：卸载脚本把自己的父 shell 打成 SIGKILL）。
+# 为什么要看 comm：proot 里的子进程被 ptrace 盯住，从 Termux 侧 readlink /proc/<pid>/exe
+# 会失败；而 termux-x11 这类 shell 包装器的 exe 是 /system/bin/sh，只有 comm 才对得上。
 killeq() {
-    local name="$1" p exe
+    local name="$1" p exe comm
     for p in /proc/[0-9]*; do
-        exe=$(readlink "$p/exe" 2>/dev/null) || continue
-        [ "$(basename "$exe")" = "$name" ] || continue
         [ "${p#/proc/}" = "$$" ] && continue
-        kill -9 "${p#/proc/}" 2>/dev/null || true
+        exe=$(readlink "$p/exe" 2>/dev/null) && [ "$(basename "$exe")" = "$name" ] && {
+            kill -9 "${p#/proc/}" 2>/dev/null || true; continue; }
+        comm=$(cat "$p/comm" 2>/dev/null) || continue
+        [ "$comm" = "$name" ] && kill -9 "${p#/proc/}" 2>/dev/null || true
     done
 }
 
@@ -63,8 +66,17 @@ fi
 
 # ---------- 清理旧桌面进程（不动 MobileGL 服务端） ----------
 # 注意：不能调 xfce-d.sh —— 那个会把 server 一起停掉，紧接着又要拉起来。
+# 容器侧的桌面进程必须从容器里杀：proot 用 ptrace 盯子进程，Termux 侧读不到它们的 exe。
+kill_desktop_in_container() {
+    proot-distro login debian --shared-tmp -- /bin/sh -c '
+        for n in xfce4-session xfwm4 xfce4-panel xfce4-notifyd xfsettingsd xfdesktop xfce4-terminal dbus-launch; do
+            pkill -x "$n" 2>/dev/null && echo "  killed $n"
+        done
+        exit 0' 2>&1 | grep -v '^proot warning' || true
+}
+
 log "清理旧桌面进程..."
-killeq xfce4-session
+kill_desktop_in_container
 killeq termux-x11
 killeq com.termux.x11
 # 旧 VirGL 链路若还有残留，顺手清掉（新版已不需要它）
