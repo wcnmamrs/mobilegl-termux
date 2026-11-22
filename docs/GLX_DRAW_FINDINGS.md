@@ -244,3 +244,37 @@ uniform vec4 _usk_RTAdjust;|in vec2 _uposition;|in vec4 _ucolor;|flat out vec4 _
 结论收窄到：**GLX 模式下 ANGLE 的桌面 GLSL 程序，draw 执行、状态正确、目标对齐，但不产生片元**。
 下一步（待做）：dump 每帧的 uniform 上传（`_usk_RTAdjust` 等），确认矩阵是否真被写进该 program 的
 默认块 / UBO；若 RTAdjust 是 0，`gl_Position` 会全塌到原点，正好表现为"画了但没有像素"。
+
+## 结论（2026-11-23 凌晨，已修）
+
+**根因：`webgl_FragColor` 被当成了 `gl_FragColor`。**
+
+ANGLE 的桌面 GL 后端自己做了一轮翻译，输出的片元着色器是：
+
+```glsl
+#version 450 core
+layout(location = 0) out vec4 mg_FragColor;   // ← 我们注入的
+out vec4 webgl_FragColor;                     // ← ANGLE 自己的输出，没写 location（→ 1）
+void main(){ webgl_FragColor = vec4(0.0, 1.0, 0.0, 1.0); }
+```
+
+`ShaderSourceProcessor` 用 `source.find("gl_FragColor")` 判断要不要迁移 legacy 输出，
+而 `webgl_FragColor` 的尾巴正好命中 → 多声明了一个 location 0 的 `mg_FragColor`，
+真正的写入落到 location 1，FBO 只有一个颜色附件 → 片元被丢弃。于是：
+
+- `glClear` 正常（不走着色器输出）→ 画布显示 clear 色
+- draw 正常执行、无 GL 错误、状态全对 → 我们前面所有埋点都"看不到问题"
+- EGL 模式正常（ANGLE 在 EGL 下发 ESSL，仍用真的 `gl_FragColor`）
+
+修复：`HasStandaloneIdentifier()` 做标识符边界判定（左右都不是 `[A-Za-z0-9_]` 才算命中），
+`usesFragColor` / `usesFragData` 改用它。
+
+验证（`__GLX_VENDOR_LIBRARY_NAME=mobilegl`，即 GLX 模式）：
+
+```
+PROBE gl readPixels=0,255,0,255    ← 之前是 255,0,0,255
+```
+
+截图里 canvas 由"只有背景色"变成完整的绿色三角形；`glxinfo -B` / `es2_info` /
+`legacy glxgears` 全部照旧正常。因此 `/etc/chromium.d/50-mobilegl` 里的
+`unset __GLX_VENDOR_LIBRARY_NAME` 已删除，安装脚本同步（v1.0.3 载荷待发）。
