@@ -25,7 +25,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-VERSION="1.0.6"
+VERSION="1.0.7"
 REPO_OWNER="wcnmamrs"
 REPO_NAME="mobilegl-termux"
 PAYLOAD_FILE="mobilegl-payload-arm64-v${VERSION}.tar.xz"
@@ -148,6 +148,26 @@ done
 # ---------------------------------------------------------------------------
 # 环境自检
 # ---------------------------------------------------------------------------
+# 容器里的多架构库目录不是所有发行版都一样（Debian 系是 usr/lib/aarch64-linux-gnu，
+# Arch/Fedora 是 usr/lib 或 usr/lib64，Alpine 是 lib）。用 ldconfig 的真实输出定位，
+# 找不到再退回常见候选；仍然找不到就把它当成致命错误，而不是写死一个路径后神秘失败。
+detect_multiarch_rel() {
+    local rel=""
+    rel=$(printf '%s' "$(in_debian 'ldconfig -p 2>/dev/null | awk "/libGL\\.so\\.1 /{print \$NF; exit}"' 2>/dev/null)" | tr -d "\r")
+    if [ -n "$rel" ]; then
+        rel=$(dirname "$rel")
+        rel=${rel#/}
+        [ -d "$PROOT_DIR/$rel" ] && { printf '%s' "$rel"; return 0; }
+    fi
+    local cand
+    for cand in usr/lib/aarch64-linux-gnu usr/lib64 usr/lib lib; do
+        if [ -e "$PROOT_DIR/$cand/libGL.so.1" ] || [ -e "$PROOT_DIR/$cand/libGLX.so.0" ]; then
+            printf '%s' "$cand"; return 0
+        fi
+    done
+    return 1
+}
+
 preflight() {
     head1 "环境自检"
 
@@ -165,6 +185,9 @@ preflight() {
     for c in curl tar xz sha256sum awk grep proot-distro python3; do need_cmd "$c"; done
     ok "基础命令齐备（curl/tar/xz/sha256sum/awk/grep/proot-distro/python3）"
 
+    MULTIARCH_REL=$(detect_multiarch_rel) || die "容器里找不到 libGL.so.1（容器内先装 libgl1/libglx0/libegl1/libglvnd0）" 3
+    ok "容器库目录 → /$MULTIARCH_REL"
+
     local sp rp
     sp=$(free_mb "$PREFIX"); rp=$(free_mb "$PROOT_DIR")
     { [ "${sp:-0}" -ge 120 ] && [ "${rp:-0}" -ge 120 ]; } || die "磁盘空间不足（需要各 120MB 以上，当前 \$PREFIX=${sp:-?}MB 容器=${rp:-?}MB）" 3
@@ -172,14 +195,14 @@ preflight() {
 
     # 容器里要有 GL 分发器（glvnd）与 OpenGL 库，否则我们的库挂上去也没人调用
     local missing=""
-    [ -e "$PROOT_DIR/usr/lib/aarch64-linux-gnu/libGL.so.1" ] || missing="$missing libgl1"
-    [ -e "$PROOT_DIR/usr/lib/aarch64-linux-gnu/libGLX.so.0" ] || missing="$missing libglx0"
-    [ -e "$PROOT_DIR/usr/lib/aarch64-linux-gnu/libEGL.so.1" ] || missing="$missing libegl1"
+    [ -e "$PROOT_DIR/$MULTIARCH_REL/libGL.so.1" ] || missing="$missing libgl1"
+    [ -e "$PROOT_DIR/$MULTIARCH_REL/libGLX.so.0" ] || missing="$missing libglx0"
+    [ -e "$PROOT_DIR/$MULTIARCH_REL/libEGL.so.1" ] || missing="$missing libegl1"
     if [ -n "$missing" ]; then
         info "容器缺少 GL 运行库：$missing —— 自动安装"
         in_debian 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq libgl1 libglx0 libegl1 libglvnd0 >/dev/null' \
             || die "容器内 apt 安装失败；请手动执行：apt-get install -y libgl1 libglx0 libegl1 libglvnd0" 3
-        [ -e "$PROOT_DIR/usr/lib/aarch64-linux-gnu/libGL.so.1" ] || die "装了但仍找不到 libGL.so.1" 3
+        [ -e "$PROOT_DIR/$MULTIARCH_REL/libGL.so.1" ] || die "装了但仍找不到 libGL.so.1" 3
     fi
     ok "容器 GL 运行库就位（libGL/libGLX/libEGL）"
 
@@ -204,6 +227,7 @@ acquire_payload() {
         [ -f "$PAYLOAD_LOCAL" ] || die "找不到本地载荷：$PAYLOAD_LOCAL" 4
         info "使用本地载荷：$PAYLOAD_LOCAL"
         PAYLOAD_DIR=$(unpack_payload "$PAYLOAD_LOCAL") || die "本地载荷解包失败" 4
+        check_abi || exit $?
         return 0
     fi
 
@@ -211,6 +235,7 @@ acquire_payload() {
     if [ -f "$cached" ] && [ "$(sha_of "$cached")" = "$PAYLOAD_SHA256" ]; then
         ok "缓存载荷校验通过（$PAYLOAD_FILE）"
         PAYLOAD_DIR=$(unpack_payload "$cached") || die "缓存载荷解包失败" 4
+        check_abi || exit $?
         return 0
     fi
 
@@ -239,6 +264,7 @@ acquire_payload() {
     ok "载荷 sha256 校验通过"
 
     PAYLOAD_DIR=$(unpack_payload "$cached") || die "载荷解包失败" 4
+        check_abi || exit $?
 }
 
 unpack_payload() {  # <tarball> → 打印解包目录
@@ -270,6 +296,33 @@ unpack_payload() {  # <tarball> → 打印解包目录
 # ---------------------------------------------------------------------------
 # 安装：Termux 侧
 # ---------------------------------------------------------------------------
+# 载荷是用 Debian trixie 的工具链编的，符号里带着 GLIBC_2.38 / GLIBCXX_3.4.32 这类版本需求。
+# 容器比它老的话，动态链接器会在启动瞬间甩一屏 "version `GLIBC_2.38' not found" ——
+# 与其让用户对着那屏猜，不如在这里先算清楚再给一句人话。
+check_abi() {
+    local lib="$PAYLOAD_DIR/glibc/libMobileGL.so"
+    [ -f "$lib" ] || { err "载荷里没有 glibc/libMobileGL.so"; return 4; }
+    local need_glibc need_cxx have_glibc have_cxx
+    need_glibc=$(strings -a "$lib" 2>/dev/null | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1 | sed 's/GLIBC_//')
+    need_cxx=$(strings -a "$lib" 2>/dev/null | grep -oE 'GLIBCXX_[0-9]+\.[0-9]+\.[0-9]+' | sort -uV | tail -1 | sed 's/GLIBCXX_//')
+    have_glibc=$(in_debian "ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$'" 2>/dev/null | tr -d '\r')
+    have_cxx=$(strings -a "$PROOT_DIR/$MULTIARCH_REL/libstdc++.so.6" 2>/dev/null | grep -oE 'GLIBCXX_[0-9]+\.[0-9]+\.[0-9]+' | sort -uV | tail -1 | sed 's/GLIBCXX_//')
+    info "载荷需要 glibc ${need_glibc:-?} / GLIBCXX ${need_cxx:-?}；容器提供 glibc ${have_glibc:-?} / GLIBCXX ${have_cxx:-?}"
+    if [ -n "$need_glibc" ] && [ -n "$have_glibc" ]; then
+        if [ "$(printf '%s\n%s\n' "$need_glibc" "$have_glibc" | sort -V | tail -1)" != "$have_glibc" ]; then
+            err "容器的 glibc ${have_glibc} 低于载荷要求的 ${need_glibc}；请把容器升到 Debian 13+ / Ubuntu 24.04+，或用源码自行重编"
+            return 3
+        fi
+    fi
+    if [ -n "$need_cxx" ] && [ -n "$have_cxx" ]; then
+        if [ "$(printf '%s\n%s\n' "$need_cxx" "$have_cxx" | sort -V | tail -1)" != "$have_cxx" ]; then
+            err "容器的 libstdc++ 只到 GLIBCXX ${have_cxx}，载荷需要 ${need_cxx}"
+            return 3
+        fi
+    fi
+    ok "容器 ABI 满足载荷要求"
+}
+
 install_termux_side() {
     head1 "安装 Termux 侧（脚本 / 兼容层 / 启动器 / 开机自启）"
 
@@ -309,7 +362,7 @@ install_termux_side() {
 install_container_side() {
     head1 "安装容器侧（$DEBIAN）"
 
-    local src="$PAYLOAD_DIR" libdir="$PROOT_DIR/usr/lib/aarch64-linux-gnu"
+    local src="$PAYLOAD_DIR" libdir="$PROOT_DIR/$MULTIARCH_REL"
     local target="$PROOT_DIR/opt/mobilegl/lib/libMobileGL.so"
 
     # 1. 客户端库
@@ -472,6 +525,7 @@ ensure_test_display() {
     info "没有运行中的 X 服务器，临时启动 :$n 做实测（验完即关）"
     setsid termux-x11 ":$n" -listen unix >/dev/null 2>&1 &
     TEST_X_PID=$!
+    TEST_X_DISPLAY=":$n"
     STARTED_X=1
     local i
     for i in $(seq 1 30); do
@@ -484,7 +538,7 @@ ensure_test_display() {
 stop_test_display() {
     [ "${STARTED_X:-0}" = 1 ] || return 0
     [ -n "${TEST_X_PID:-}" ] && kill "$TEST_X_PID" 2>/dev/null || true
-    pkill -f "termux-x11 :5 -listen unix" 2>/dev/null || true
+    [ -n "${TEST_X_DISPLAY:-}" ] && pkill -f "termux-x11 ${TEST_X_DISPLAY} -listen unix" 2>/dev/null || true
     STARTED_X=0
     dim "临时 X 已关闭"
 }
@@ -550,8 +604,14 @@ do_rollback() {
     rm -rf "$PROOT_DIR/opt/mobilegl" "$PROOT_DIR/etc/mobilegl"
     rm -f "$PROOT_DIR/etc/profile.d/mobilegl.sh" "$PROOT_DIR/etc/environment.d/10-mobilegl.conf" \
           "$PROOT_DIR/etc/chromium.d/50-mobilegl" \
-          "$PROOT_DIR/usr/share/glvnd/egl_vendor.d/10_mobilegl.json" \
-          "$PROOT_DIR/usr/lib/aarch64-linux-gnu/libGLX_mobilegl.so.0"
+          "$PROOT_DIR/usr/share/glvnd/egl_vendor.d/10_mobilegl.json" || true
+    # 卸载路径不跑 preflight，MULTIARCH_REL 可能没设过；这里按候选目录挨个清，避免 set -u 报错。
+    local linkdir
+    for linkdir in ${MULTIARCH_REL:+"$PROOT_DIR/$MULTIARCH_REL"} \
+                   "$PROOT_DIR/usr/lib/aarch64-linux-gnu" "$PROOT_DIR/usr/lib64" \
+                   "$PROOT_DIR/usr/lib" "$PROOT_DIR/lib"; do
+        [ -n "$linkdir" ] && rm -f "$linkdir/libGLX_mobilegl.so.0" || true
+    done
     in_debian 'ldconfig' >/dev/null 2>&1 || true
     ok "容器侧已清理"
 }
@@ -571,9 +631,14 @@ uninstall_all() {
     local check
     for check in "$PROOT_DIR/opt/mobilegl" "$PROOT_DIR/etc/mobilegl" \
                  "$PROOT_DIR/etc/profile.d/mobilegl.sh" \
-                 "$PROOT_DIR/usr/share/glvnd/egl_vendor.d/10_mobilegl.json" \
-                 "$PROOT_DIR/usr/lib/aarch64-linux-gnu/libGLX_mobilegl.so.0"; do
+                 "$PROOT_DIR/usr/share/glvnd/egl_vendor.d/10_mobilegl.json"; do
         [ -e "$check" ] && leftovers+=("$check")
+    done
+    # 同样：卸载时不依赖 MULTIARCH_REL，直接扫候选目录里的软链
+    for check in ${MULTIARCH_REL:+"$PROOT_DIR/$MULTIARCH_REL"} \
+                 "$PROOT_DIR/usr/lib/aarch64-linux-gnu" "$PROOT_DIR/usr/lib64" \
+                 "$PROOT_DIR/usr/lib" "$PROOT_DIR/lib"; do
+        [ -n "$check" ] && [ -e "$check/libGLX_mobilegl.so.0" ] && leftovers+=("$check/libGLX_mobilegl.so.0")
     done
     if [ ${#leftovers[@]} -eq 0 ]; then
         ok "容器侧无残留"

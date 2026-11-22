@@ -111,6 +111,20 @@ shots/                          实拍证据（Chromium / mpv / 三个游戏 / �
 历史版本一律保留，`docs/CHANGELOG.md` 里记着每个版本的载荷 sha256 与改动。
 即便某个 release 的二进制资产已不可得，也能用对应 tag 的源码 + `docs/GUIDE.md` 重建。
 
+## 支持范围
+
+| 项 | 要求 |
+|---|---|
+| 设备 | arm64-v8a（aarch64）手机/平板，Android 8.0+（API 26+，库按 26 构建） |
+| Termux | 官方 Termux（bionic）；服务端就跑在 Termux 这一侧，直接 dlopen 系统 `libvulkan.so` 拿 Mali |
+| 容器 | **Debian 13 / Ubuntu 24.04 及以上**；载荷需要 `glibc ≥ 2.38`、`GLIBCXX ≥ 3.4.32`（`install.sh` 会预检并给出中文提示） |
+| proot-distro | v4 的容器路径布局（`$PREFIX/var/lib/proot-distro/containers/<名字>`）；容器名可用 `DEBIAN_NAME=` 覆盖 |
+| 桌面/窗口程序 | 需要 `termux-x11`（可选；只跑离屏 GL 不需要） |
+| 已知不适用 | Alpine（musl）、未适配的 Arch/Fedora 容器 —— 多架构库目录会自动探测，但 `apt` 安装步骤与 glibc 版本需自行处理 |
+
+`install.sh` 会先探测容器里 `libGL.so.1` 的实际目录（不同发行版 `usr/lib/aarch64-linux-gnu` / `usr/lib64` / `usr/lib` 各不相同），
+再比对载荷与容器的 `GLIBC` / `GLIBCXX` 版本；任一项不满足就直接退出，而不是让动态链接器甩一屏 `version not found`。
+
 ## 快速开始
 
 装好 Termux 基础件（`proot-distro`、一个 Debian 容器、`termux-x11` 可选），然后一条命令：
