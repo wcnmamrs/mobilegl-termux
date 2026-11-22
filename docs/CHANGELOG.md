@@ -12,6 +12,17 @@
   修法：两行合成一个多行字符串；并在安装阶段加自检（缺 `unset __GLX_VENDOR_LIBRARY_NAME`
   或 `--use-angle=gles` 就直接 `[E]` 并退出 5，不再"装完看起来 OK"）。
 
+## v1.0.3 — 2026-11-23
+
+- 修复：片元着色器输出被误判。`ShaderSourceProcessor` 用纯文本查找 `gl_FragColor`，
+  而 ANGLE 桌面 GL 后端输出的变量名是 `webgl_FragColor`，尾巴命中 → 额外注入一个
+  `location = 0` 的 `mg_FragColor`，真正的写入落到 `location = 1`，被只有单个颜色附件的
+  FBO 丢弃。现象是 GLX 模式下 WebGL“只有底色、画不出几何”，且无 GL 错误。
+  改为标识符边界判定（`HasStandaloneIdentifier`）。
+- 结果：Chromium 不再需要 `unset __GLX_VENDOR_LIBRARY_NAME`，`/etc/chromium.d/50-mobilegl`
+  只写 `CHROMIUM_FLAGS`。GLX / EGL / ANGLE / WebGL / legacy 五条路同时可用。
+- 载荷 sha256：`f20a2304303cf367eae58f8567de78924d922e00b7bb9718ee7efa72e5d9fc2f`
+
 ## v1.0.2 之后的脚本修正（续）
 
 - **Chromium 在桌面会话里报 `BindToCurrentSequence failed` 的根因**：会话继承了

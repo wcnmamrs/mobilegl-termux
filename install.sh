@@ -25,11 +25,11 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-VERSION="1.0.2"
+VERSION="1.0.3"
 REPO_OWNER="wcnmamrs"
 REPO_NAME="mobilegl-termux"
 PAYLOAD_FILE="mobilegl-payload-arm64-v${VERSION}.tar.xz"
-PAYLOAD_SHA256="d3a0037bbb234409208fc89f4015a76ea247d478fd81da466898a4700c4bc1c4"
+PAYLOAD_SHA256="f20a2304303cf367eae58f8567de78924d922e00b7bb9718ee7efa72e5d9fc2f"
 
 MGL_HOME="${MGL_HOME:-$HOME/mgl}"
 DEBIAN="${DEBIAN_NAME:-debian}"
