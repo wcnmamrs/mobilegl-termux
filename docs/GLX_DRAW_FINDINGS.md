@@ -71,3 +71,17 @@ es-3.0      err_draw=0x0    centre=0,255,0,255   ✅
 ### 剩下的可疑点（下一轮从这里开始）
 - ANGLE 在 GLX 模式下把 WebGL 渲染进 **它自己的离屏表面/FBO**，再合成；我们的统计里 glx swap 与 egl swap 数量一致，说明两条呈现路都在跑，但读到的是空帧 → 需要按 ANGLE `RendererGL`/`StateManagerGL` 的实际调用序列（`glBindFramebuffer` + `glViewport` + `glDrawElementsInstanced` + `glBlitFramebuffer` 或 `glCopyImageSubData`）逐步复刻一次，找出第一个"结果没落地"的调用。
 - 也可能与 **每 drawable 一个 EGL pbuffer 表面 + 多线程多上下文** 有关（Chromium 的 raster 线程与 compositor 线程各自 MakeCurrent），需要给 surface 绑定加日志确认。
+
+## 追加实验二（2026-11-22 21:30）—— 纹理附件 / instanced / fence / scissor / 负高度 viewport
+
+| 测试 | 内容 | 结果 |
+|---|---|---|
+| `glxprobe12` | 纹理附件 FBO（`glTexStorage2D` + `glTexSubImage2D`）+ `glDrawArraysInstanced` + `glDrawElementsInstanced` + `glFenceSync`/`glClientWaitSync` | 全部 `err=0x0`（该探针把三角形画成红色、底色也是红色，读回自然是红，**结论作废一次**，见下一条） |
+| `glxprobe13` | 同上但三角形用绿色：读回 / blit 到默认帧缓冲 / 把纹理采样画出来 | 三条都是 `0,255,0,255` ✅ —— **纹理附件 FBO 完全正常** |
+| `glxprobe14` | scissor 全屏 / 10×10 + cull face 正反绕序 | cull 行为正确（CW 被剔除、CCW 画出）；scissor 那两条当时被前面 viewport 错误污染，见 probe16 |
+| `glxprobe15` | 负高度 viewport（`0,240,320,-240` 与 `0,0,320,-240`） | **`GL_INVALID_VALUE(0x501)`，viewport 保持 0,0,320,240** —— ES 上下文里负高度非法（符合 ES 规范，但桌面 GL 程序若依赖它就会踩） |
+| `glxprobe16` | scissor 状态与裁剪 | `scissortest=1 box=0,0,4,4`，中心像素被裁成 `0,0,0,0` ✅ —— **scissor 确实生效**（另有 `0x502` 错误来自探针自身的前置调用） |
+
+补充结论：
+- `BuildVertices`/`glXMakeCurrent` 之后 `GL_VIEWPORT` 仍是 `0,0 0x0`（真 bug，未修）；但后端在 viewport 宽高为 0 时会退化成逻辑分辨率，所以探针仍能画出来 —— 真实程序若查询 `GL_VIEWPORT` 再据此计算，可能出问题。
+- 直到这一轮为止，**我们的 GL 层在每一条可构造的路径上都正确**；ANGLE 在 GLX 模式下丢失 WebGL 内容这件事，无法再用"某个 GL 入口坏了"解释，下一步只能进 ANGLE 内部（`RendererGL`/`StateManagerGL` 的调用序列）或给我们自己的 GLX 层加"每次 draw 的 FBO/drawable 记录"来对照。
