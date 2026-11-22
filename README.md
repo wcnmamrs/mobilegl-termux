@@ -4,7 +4,9 @@
 容器内的 OpenGL 4.6 / GLES 调用经 `MobileGL` 的 split 传输送到 Termux 侧的常驻服务端，
 服务端用厂商 Vulkan 渲染，帧再经 **dma-buf 零拷贝**（DRI3+Present）送回 X 服务器。
 
-本仓库**不含二进制**，只含：补丁、脚本、探针、文档。库需要你按 `docs/GUIDE.md` 自行编译（约 20 分钟）。
+**装的时候不需要编译。** 预编译好的库随 [Releases](../../releases) 分发（arm64，单包约 8.7MB），
+`install.sh` 下载并三重校验后直接装进容器；只有想跟上游更新或改补丁的人，才需要按 `docs/GUIDE.md`
+自己编（那一趟是整夜的活，不是 20 分钟）。
 
 ---
 
@@ -128,8 +130,20 @@ bash ~/mgl-src/install.sh --uninstall    # 卸载（按清单逐项删除并校�
 bash ~/mgl-src/install.sh --payload x.tar.xz   # 离线安装
 ```
 
-想自己从源码编（改补丁、换设备、看细节）：照 `docs/GUIDE.md` 走一遍，产物放在
-`~/src/MobileGL/build-{glibc,bionic}`，`install.sh` 会自动优先用它们。
+想自己从源码编（改补丁、换设备、看细节）：照 `docs/GUIDE.md` 走一遍，产物在
+`~/src/MobileGL/build-{glibc,bionic}`。`install.sh` **不会**自动采用它们——自己编的库要覆盖两处：
+
+```bash
+# 客户端（容器里所有 glibc 程序）
+install -m 755 ~/src/MobileGL/build-glibc/libMobileGL.so \
+  "$PREFIX/var/lib/proot-distro/containers/debian/rootfs/opt/mobilegl/lib/libMobileGL.so"
+# 服务端（Termux 侧常驻进程）
+install -m 755 ~/src/MobileGL/build-bionic/libMobileGL.so       ~/mgl/lib/
+install -m 755 ~/src/MobileGL/build-bionic/libMobileGLServer.so ~/mgl/lib/
+~/mgl/stop-server.sh; ~/mgl/start-server.sh
+```
+
+或者用 `scripts/install-system.sh` 重新部署一遍（它读的就是这两个 build 目录）。
 
 日常：
 

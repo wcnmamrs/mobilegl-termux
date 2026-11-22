@@ -8,6 +8,9 @@
 > 结果：`OpenGL 4.6.0 MobileGL`，`Magma (MobileGL Core) (Mali-G57 MC2, Vulkan 1.1.177)`，
 > glmark2 800×600 得分 **306**（同机 virgl 是 99）。
 
+> **只是想装上用？** 不需要看这篇——回 [README](../README.md) 跑 `install.sh` 即可（预编译载荷，1–2 分钟）。
+> 本文是**从源码编译**的完整流程：跟上游更新、改补丁、换设备时才用。
+
 ---
 
 ## 0. 先搞清楚：容器里其实"看不见"GPU
