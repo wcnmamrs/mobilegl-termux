@@ -201,3 +201,23 @@ resolve write=0 fbo=2.0 surface=40.0 image=0x…e020        ← 回读的也正�
 `default=1`）是能画出来的，画布这笔画不出来。下一步需要在 `GetOrCreatePipeline` 里 dump
 `VkVertexInputBindingDescription` / `VkVertexInputAttributeDescription`（尤其 stride 与 format），
 以及该 program 的 SPIR-V 是否与 ES 上下文版本匹配。
+
+## 追加实验七（2026-11-22 23:40）—— 管线本身是对的，排除顶点装配
+
+`GetOrCreatePipeline` 里 dump 出画布那一笔的 `VkVertexInput*`：
+
+```
+pipeline program=1 mode=4 bindings=1 attributes=1 loc=0x1 active=0x1 missing=0x0 synthetic=0
+pipeline binding[0]   index=0 stride=8 rate=0
+pipeline attribute[0] loc=0 binding=0 format=103 offset=0      # 103 = VK_FORMAT_R32G32_SFLOAT
+```
+
+stride 8、R32G32_SFLOAT、offset 0、单属性、非 synthetic —— 与 `attribute vec2 p` 完全一致。
+再验证"是不是 clear 把三角形盖掉了"：写一个**不调 glClear** 的页面（`/tmp/tri4.html`），
+`readPixels=0,0,0,0` —— 还是没画进去（ANGLE 自己的初始清屏是透明黑）。
+
+server 日志里 `Magma wire decline` 计数为 0，`vkCmdDraw` 确实执行了。至此排除：
+FBO 三方对齐、共享上下文、顶点缓冲大小/格式/步长、viewport、blend、depth、cull、decline。
+剩下的可能都指向"着色器/管线状态某处让光栅化什么都没产生"，下一步要在
+`GetOrCreatePipeline` 里 dump `VkPipelineDepthStencilStateCreateInfo`、`VkPipelineRasterizationStateCreateInfo`
+与 program 的 SPIR-V 头（版本/entry），并和能用 EGL 路径跑通的同一条管线逐字段对比。
