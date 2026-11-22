@@ -221,3 +221,26 @@ FBO 三方对齐、共享上下文、顶点缓冲大小/格式/步长、viewport
 剩下的可能都指向"着色器/管线状态某处让光栅化什么都没产生"，下一步要在
 `GetOrCreatePipeline` 里 dump `VkPipelineDepthStencilStateCreateInfo`、`VkPipelineRasterizationStateCreateInfo`
 与 program 的 SPIR-V 头（版本/entry），并和能用 EGL 路径跑通的同一条管线逐字段对比。
+
+## 追加实验八（2026-11-22 23:50）—— ANGLE 在 GLX 模式喂给我们的着色器是桌面 GLSL 450
+
+打开 `MOBILEGL_MAGMA_TRACE` 后 dump `ShaderCompiler::CompileShader` 的入参，GLX 模式下看到的
+顶点着色器已经是 **`#version 450 core`**（ANGLE 的 GL 后端自己翻译出来的桌面 GLSL）：
+
+```
+shader type=0x8b31 len=563 src=[#version 450 core|vec4 sbbe(in vec2 sbbf, in float sbc0, in float sbc1){...
+uniform vec4 _usk_RTAdjust;|in vec2 _uposition;|in vec4 _ucolor;|flat out vec4 _uvcolor_S0;|void main(]
+```
+
+也就是说：GLX 这条路上 ANGLE 直接用桌面 GLSL（`_uposition`/`_usk_RTAdjust` 那套），EGL 那条路
+走的是 ESSL。两条路的瓶颈不在我们的着色器处理（450 core 我们自己编得出来，`glxprobe5` 证明
+3.3 core + VBO 能画）。
+
+另外修正前面一个误判：EGL 那次"没有新建管线"是我在日志落盘前就 grep 造成的假象；完整统计
+（`grep -ac 'pstate programHash'` = 60 行）显示两次运行各自建了自己的管线，且 GLX 侧画布那笔
+是 `programHash=0x47d80a173f244594`（FS 85 words），EGL 侧是 `0xf9a5faa9d84efe3b`（FS 113 words）
+—— 程序不同是正常的（ANGLE 针对两个后端发不同的 GLSL）。
+
+结论收窄到：**GLX 模式下 ANGLE 的桌面 GLSL 程序，draw 执行、状态正确、目标对齐，但不产生片元**。
+下一步（待做）：dump 每帧的 uniform 上传（`_usk_RTAdjust` 等），确认矩阵是否真被写进该 program 的
+默认块 / UBO；若 RTAdjust 是 0，`gl_Position` 会全塌到原点，正好表现为"画了但没有像素"。
