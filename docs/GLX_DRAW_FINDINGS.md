@@ -182,3 +182,22 @@ fbo 23 vs 1）。同一批日志里更早的帧里 68/43 轮流当过写目标�
 `readPixels=255,0,0,255` —— 说明不能只怪读写两面错位，绘制本身落进的那张图在回读时也不是
 ANGLE 认定的那张。下一步要在 `SetupWireDraw` 里记下 render pass 的实际 VkFramebuffer 与
 附件图象，与 `ReadWirePixels` 的来源三方对齐。
+
+## 追加实验六（2026-11-22 23:20）—— 目标/附件/回读已三方对齐，仍无像素
+
+加了 `MOBILEGL_MAGMA_TRACE=1` 的 `pass`/`draw`/`slice` 三种埋点后，Chromium 的 canvas 那一笔完整可见：
+
+```
+pass    fb=0x…2820 extent=200x200 attach[0] image=0x…e020  attach[1] image=0x…1170
+slice[0] buf=0x…1ae0 off=0 size=24 mapped=0x0            ← 24 字节 = 3 个 vec2，正是那三个顶点
+draw    mode=4 vtxSlices=1 locMask=0x1 attrMask=0x1 default=0
+resolve write=0 fbo=2.0 surface=40.0 image=0x…e020        ← 回读的也正是这张
+```
+
+即：**绘制目标、render pass 附件、回读源三方已经是同一张 VkImage**，顶点缓冲 24 字节、
+单属性 loc0、无 blend / 无 depth / 无 cull、viewport 200x200 —— 画完中心仍是底色。
+
+所以剩下的嫌疑收窄到"管线的顶点装配或着色器侧"：同一条链路里 UI 字形（`mode=5`、两个属性、
+`default=1`）是能画出来的，画布这笔画不出来。下一步需要在 `GetOrCreatePipeline` 里 dump
+`VkVertexInputBindingDescription` / `VkVertexInputAttributeDescription`（尤其 stride 与 format），
+以及该 program 的 SPIR-V 是否与 ES 上下文版本匹配。
