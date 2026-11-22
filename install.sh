@@ -401,6 +401,7 @@ MOBILEGL_IPC_PROBE_TIMEOUT_MS=250'
 
     # 6. Chromium（Debian 包读 /etc/chromium.d/*）
     write_file_atomic "$PROOT_DIR/etc/chromium.d/50-mobilegl" \
+        'unset __GLX_VENDOR_LIBRARY_NAME' \
         'CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-gl=angle --use-angle=gles --ignore-gpu-blocklist --no-sandbox --disable-dev-shm-usage"'
     record "$PROOT_DIR/etc/chromium.d/50-mobilegl"
     ok "Chromium 旗标 → /etc/chromium.d/50-mobilegl"

@@ -374,6 +374,13 @@ chromium --app=https://example.com
 > `glClear` 也生效，但 `glDrawArrays` 的几何**不落进 canvas**（`readPixels=0,0,0,255`），
 > 所有真 3D 站点因此空白。换 GLES 后端后 `readPixels=0,255,0,255`，get.webgl.org 正常出立方体。
 >
+> **桌面会话里必须 `unset __GLX_VENDOR_LIBRARY_NAME`。** 这个变量由 `/etc/profile.d/mobilegl.sh` 设成
+> `mobilegl`，让 GLX 程序走我们的 GLX 层——但 Chromium 的 GL 初始化会先尝试 "GLX 上的 OpenGL ES"，
+> 而我们的 GLX 层没有 `GLX_EXT_create_context_es_profile`，于是这条尝试失败并连带整条 EGL 初始化链
+> 全灭（页面看到的就是 `BindToCurrentSequence failed`、`VENDOR = 0xffff`）。所以
+> `/etc/chromium.d/50-mobilegl` 第一行就是 `unset __GLX_VENDOR_LIBRARY_NAME`：
+> Chromium 改走 glvnd EGL → MobileGL EGL，合成与 WebGL 都仍在 Mali 上。
+>
 > `/usr/local/bin/chromium-gpu` 现在**只做透传**（`exec /usr/bin/chromium "$@"`）。早先它自己也写了一套
 > `--use-angle=gl`，与 `chromium.d` 里的旗标打架——两套旗标谁生效取决于 Chromium 的解析顺序，
 > 于是同一个浏览器有时候能画、有时候报 `BindToCurrentSequence failed`。现在只留一处。

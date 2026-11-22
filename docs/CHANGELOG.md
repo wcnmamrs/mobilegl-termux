@@ -1,5 +1,14 @@
 # 变更记录
 
+## v1.0.2 之后的脚本修正（续）
+
+- **Chromium 在桌面会话里报 `BindToCurrentSequence failed` 的根因**：会话继承了
+  `__GLX_VENDOR_LIBRARY_NAME=mobilegl`，Chromium 初始化 GL 时先试 "OpenGL ES on GLX"，
+  而我们的 GLX 层不提供 `GLX_EXT_create_context_es_profile`，失败后 `eglInitialize` 全线返回
+  `EGL_NOT_INITIALIZED`，WebGL 拿不到 context（`VENDOR = 0xffff`）。
+  修法：`/etc/chromium.d/50-mobilegl` 里 `unset __GLX_VENDOR_LIBRARY_NAME`，只影响 Chromium；
+  桌面会话里的其它程序照旧用 GLX 走 MobileGL。
+
 ## v1.0.2 之后的脚本修正（载荷未变，仍是 v1.0.2）
 
 `install.sh` 不在载荷里，所以只改安装器的修正不需要发新版；记录在此以免断档：
