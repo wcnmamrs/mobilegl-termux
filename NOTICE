@@ -1,6 +1,8 @@
 mobilegl-termux —— 许可说明
 ================================================================
 
+本仓库整体以 MIT 发布（见 LICENSE）。预编译二进制涉及上游许可，逐条说明如下。
+
 1) 本仓库的脚本、文档、探针源码、兼容层源码
    （scripts/、examples/、extras/*.c、docs/、README.md、install.sh）
    → MIT，见 LICENSE。
