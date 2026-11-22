@@ -1,0 +1,14 @@
+# 构建产物
+build-*/
+*.o
+*.so
+*.a
+
+# 运行期
+*.log
+*.pid
+*.xwd
+*.raw
+
+# 本地路径覆盖
+local.env

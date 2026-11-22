@@ -1,0 +1,183 @@
+# MobileGL Termux 工具链 —— 让 proot Linux 容器直接用上手机 GPU
+
+在**无 root** 的 Android 设备上，把 Mali（或任何厂商）GPU 的 Vulkan 借给 proot 里跑的 glibc 程序：
+容器内的 OpenGL 4.6 / GLES 调用经 `MobileGL` 的 split 传输送到 Termux 侧的常驻服务端，
+服务端用厂商 Vulkan 渲染，帧再经 **dma-buf 零拷贝**（DRI3+Present）送回 X 服务器。
+
+本仓库**不含二进制**，只含：补丁、脚本、探针、文档。库需要你按 `docs/GUIDE.md` 自行编译（约 20 分钟）。
+
+---
+
+## 为什么需要它
+
+Android 的 `/dev/mali*`、`/dev/dri/*` 对 `untrusted_app` 域不可读，proot 容器（glibc 进程）里
+`vulkaninfo` 只能看到 Mesa 的软件 ICD：
+
+| 检查项 | Termux（bionic） | proot Debian（glibc） |
+|---|---|---|
+| `vulkaninfo` | ✅ `Mali-G57 MC2` | ❌ 只有 Mesa ICD（llvmpipe） |
+| `glxinfo`（未配置前） | — | ❌ `llvmpipe (LLVM 22.1.8, 128 bits)` |
+| `/dev/dri/*` | Permission denied | Permission denied |
+
+所以 GL 调用必须在容器**外**执行 —— 这正是 `MOBILEGL_TRANSPORT=spawn` 的 split 架构。
+本项目把它接线到「装好就能用」的状态：容器里任何程序一起手就是 Mali。
+
+---
+
+## 实测结果（本机：天玑 700 / Mali-G57 MC2 / Android 12 / 无 root）
+
+| 项目 | 软件渲染（llvmpipe / virpipe） | 本项目（Magma + Mali Vulkan） |
+|---|---|---|
+| `glmark2 -s 800x600` 总分 | 99（virpipe） | **264 ~ 337** |
+| glmark2 纹理 / 着色场景 | 115 左右 | **300 ~ 400 FPS** |
+| GL 版本 | 4.3（virpipe，GLES 仿真） | **4.6 core / GLSL 4.60** |
+| 呈现路径 | 命令流 → GLES → ANGLE → Vulkan → 回读 | Vulkan → **dma-buf → DRI3+Present 零拷贝** |
+| Chromium WebGL | SwiftShader / llvmpipe | `ANGLE (MobileGL-Dev …, Magma (MobileGL Core) …)` |
+| mpv 视频渲染 | — | `VO: [gpu] 2392x1080 yuv420p`，30 fps 不丢帧 |
+
+`glxinfo -B` 现在输出：
+
+```
+OpenGL vendor string:   MobileGL-Dev (BZLZHH, Swung0x48, Tungsten)
+OpenGL renderer string: Magma (MobileGL Core) (Mali-G57 MC2, Vulkan 1.1.177, Driver 32.1.0)
+OpenGL core profile version string: 4.6.0 MobileGL 26.11-dev, Direct (Vulkan) Backend, GIT@2bdbe05
+```
+
+---
+
+## 目录
+
+```
+patches/mobilegl-compat.patch   上游 MobileGL 的全部改动（15 文件，+1252/−116）
+scripts/                        服务端、启动器、体检、系统级安装、桌面启动
+extras/                         GL1.x 兼容层 / 关垂直同步 / GetProcAddress 诊断（LD_PRELOAD）
+examples/                       EGL X11 窗口表面探针、桌面 GL 上下文探针
+docs/GUIDE.md                   从零编译的完整指南（含 25 条踩坑总表）
+docs/NOTES.md                   调试笔记与逐项实测数据（很长，按需查）
+docs/reference/                 逆向参考：termux-x11 的 lorie/dri3.c、renderer.c，ANGLE DisplayGLX.cpp
+shots/                          实拍证据（Chromium / mpv / 三个游戏 / 通道顺序校验）
+```
+
+---
+
+## 快速开始
+
+装好 Termux 基础件（`proot-distro`、一个 Debian 容器、`termux-x11` 可选），然后一条命令：
+
+```bash
+git clone https://github.com/wcnmamrs/mobilegl-termux.git ~/mgl-src
+bash ~/mgl-src/install.sh
+```
+
+安装脚本会：自检环境 → 下载预编译载荷并三重校验（整包 sha256 / 清单 / 逐文件）→
+把库和配置装进容器与 Termux → 起服务端 → **实测 GLX 与 EGL 两条路都走到 GPU** 才算成功。
+任何一步失败都会自动回滚。
+
+```bash
+bash ~/mgl-src/install.sh --check        # 只体检，不改文件
+bash ~/mgl-src/install.sh --uninstall    # 卸载（按清单逐项删除并校验）
+bash ~/mgl-src/install.sh --payload x.tar.xz   # 离线安装
+```
+
+想自己从源码编（改补丁、换设备、看细节）：照 `docs/GUIDE.md` 走一遍，产物放在
+`~/src/MobileGL/build-{glibc,bionic}`，`install.sh` 会自动优先用它们。
+
+日常：
+
+```bash
+~/xfce.sh                          # 开桌面（自动确保服务端与 X）
+bash ~/mgl/gpu-check.sh            # 体检：两条路都出现 Magma 即正常
+bash ~/mgl/gpu-check.sh 程序名      # 用完整 GPU 环境跑任意程序
+```
+
+---
+
+## 脚本一览
+
+| 脚本 | 作用 |
+|---|---|
+| `start-server.sh` | 起 bionic 服务端（`@mobilegl`，默认 8 个会话），日志 `/storage/emulated/0/MG/latest.server.log` |
+| `ensure-server.sh` | **探测式**自愈：连抽象 socket 看是否真应答，不通就重启（pidfile 活着≠能用） |
+| `stop-server.sh` | 停服务端 |
+| `env.sh` | 容器侧环境（`source` 用）；`source env.sh stop` 全部取消 |
+| `mgl-run.sh` | 通用启动器：先 ensure-server，再带着完整环境进容器跑任意命令 |
+| `install-system.sh` | 把库和配置装进容器（`/opt/mobilegl`、glvnd JSON、`/etc/profile.d`、`/etc/mobilegl/client.conf`、`/etc/chromium.d`）；`remove` 卸载 |
+| `gpu-check.sh` | 四段体检；`gpu-check.sh <程序>` 用完整环境跑单个程序 |
+| `switch.sh` | `mobilegl` / `virpipe` / `status` / `ensure` / `desktop` / `bench` |
+| `legacy.sh` | 带 GL1.x 兼容层跑老程序 |
+| `xfce.sh` / `xfce-d.sh` | 起 / 停整台桌面 |
+
+改路径就看脚本开头的变量：`MGL_BUILD`、`MGL_GLIBC`、`MGL_HOME`、`MGL_ENDPOINT`、`MGL_SESSIONS`、`PROOT_DIR`。
+默认值按 Termux 标准布局写死（`/data/data/com.termux/files/home`），换设备时改这几行即可。
+
+---
+
+## 补丁解决了什么
+
+上游 MobileGL 在两类场景下还接不住真实程序，`patches/mobilegl-compat.patch` 修的就是这些：
+
+1. **`GetProcAddress` 覆盖度**：库导出 2952 个 GL 符号，但查找表只列了 1399 条；GLAD/GLEW 这类
+   "逐个询问"的加载器拿到 `NULL` 后直接 `call NULL` 崩溃（LOVE 引擎的 `glMatrixMode` 就是这么死的）。
+   → 找不到的名字回落到 `dlsym(RTLD_DEFAULT)`。
+2. **兼容档矩阵栈**：`gl_ModelViewProjectionMatrix` 这一族在 Vulkan/glslang 里不存在，MobileGL 也不处理。
+   → 补 CPU 侧矩阵栈 + `glMatrixMode/glOrtho/glPushMatrix/...`，并在 draw 前把 `mg_*Matrix` uniform 上传
+   （走内部 API，避免 `GLStreamScope` 的非递归锁死锁）；shader 侧注入同名 uniform。
+3. **亮度纹理格式**：`GL_LUMINANCE8_ALPHA8` / `GL_ALPHA8` 等返回 `GL_INVALID_ENUM`（LOVE 的字体图集必挂）。
+   → 降到 `R8`/`RG8` 存储 + swizzle 还原语义。
+4. **`gl_FragColor` / `gl_FragData` 冲突**：宏别名 `#define love_Canvases gl_FragData` 没有任何下标访问，
+   却为它声明 8 个输出，把 `mg_FragColor` 挤到 location 8 而链接失败。→ 只在真有下标访问时才声明数组。
+5. **DRI3 零拷贝三个根因**：gralloc 句柄里第一个 fd 不可 `mmap`；发给 X 服务器的 modifier 是真 DRM modifier
+   而 termux-x11 只认 `RAW_MMAPPABLE_FD(1274)`；GPU-only usage 下拿到的是 AFBC 压缩布局。
+   → 选可映射 fd + modifier 回退 + 补 `CPU_READ_OFTEN` 换线性布局；通道顺序用一张 BGRA 中间图
+   （`vkCmdBlitImage` 转换 + `vkCmdCopyImage` 搬运）解决，避免给 Mali 喂它不认的 BGRA AHB。
+6. **GLX 三处缺口**（Chromium/ANGLE 走 GLX 才暴露）：`GLX_DRAWABLE_TYPE` 过滤过严、
+   `glXCreatePbuffer` 是返回 0 的 stub、FBConfig 只有两条写死的配置且 `GLX_VISUAL_ID` 恒为默认 visual
+   （`eglInitialize: Invalid visual ID requested`）。→ 按 visual 动态建表 + pbuffer drawable 支持。
+7. **EGL 的 X11 窗口表面**（mpv、Firefox 这类不走 GLX 的程序）：原来把 X 窗口 id 直接发给 Android 服务端
+   → 会话段错误。→ 新增 `X11WindowPresent`，EGL 窗口表面复用 GLX 那条呈现链：离屏 pbuffer 渲染 +
+   `eglSwapBuffers` 时把帧送进 X 窗口；`eglCreatePlatformWindowSurface` 同样处理，并容忍
+   "native_window 是指向 Window 的指针"（mpv/ANGLE 的实际行为）。
+
+---
+
+## extras/（可选）
+
+| 文件 | 作用 | 构建 |
+|---|---|---|
+| `fixfunc.c` | GL 1.x 固定管线兼容层（`glBegin/glVertex*/glMatrixMode/显示列表/客户端数组/光照/纹理` → 现代 GL） | `bash extras/build-extras.sh` |
+| `novsync.c` | 强制 `glXSwapInterval*(0)`，解开 60 Hz 限制（glxgears 59 → 376 FPS） | 同上 |
+| `gpalog.c` | 记录 `glXGetProcAddress` 返回 `NULL` 的名字，排查加载器问题 | 同上 |
+
+用法：`LD_PRELOAD=~/mgl/lib/libfixfunc.so <程序>`，或 `scripts/legacy.sh <程序>`。
+
+---
+
+## 边界（明确不做的事）
+
+- **视频解码**：不走 GL。容器里没有 MediaCodec（那是 bionic 才有的），也没有 `/dev/video*`、`/dev/dri`，
+  所以 `ffmpeg/mpv` 在容器内始终软解 —— 本项目不改变这一点，也不打算改变。
+  想要硬解只能在 Termux 侧（`mpv --hwdec=mediacodec-copy` 可用，CPU 占用约 1/3）。
+- **原生 Vulkan 程序**：容器内 `vulkaninfo` 仍只有 Mesa ICD，Vulkan 应用看不到 Mali（GL 调用是被代理的，
+  Vulkan 不是）。
+- **WebGPU / WebNN**：Chromium 的 Vulkan 后端同上。
+
+优雅退化：服务端不在时，`ImplementationAvailable()` 会让 glvnd 落到 Mesa（llvmpipe），程序不崩、只是变慢。
+
+---
+
+## 环境与兼容性
+
+- 本仓库的补丁基于 MobileGL `2bdbe05`（dev 分支）与 Termux:X11 `d366d40`；上游更新后可能需要重新适配。
+- 实测设备：TFY-AN00（天玑 700 / Mali-G57 MC2 / Android 12 / arm64-v8a / 无 root）。
+- 换到 Adreno / PowerVR 时，主要差异在 AHB 的 fd 布局与 modifier 语义，`docs/GUIDE.md` §12 的
+  DRI3 相关三条请重新验证。
+- 构建侧：容器内 gcc 14 + CMake 3.31；Termux 侧 clang 21（`-DANDROID_PLATFORM=android-26`）。
+
+---
+
+## 许可
+
+本仓库的脚本与补丁：MIT（见 `LICENSE`）。
+上游项目：[MobileGL](https://github.com/MobileGL-Dev/MobileGL)（LGPL-3.0）、
+[Termux:X11](https://github.com/termux/termux-x11)、[libglvnd](https://gitlab.freedesktop.org/glvnd/libglvnd)、
+[ANGLE](https://chromium.googlesource.com/angle/angle)。`docs/reference/` 下的文件仅作分析参考，版权归各自作者。

@@ -1,0 +1,1920 @@
+diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.cpp
+index e7f1b1a..d1e6236 100644
+--- a/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.cpp
++++ b/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.cpp
+@@ -472,6 +472,9 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+         CollectWireObjects(m_submitCounter, true);
+         ClearAllWireDrawPassCaches();
+         DestroyWireColorBlitResources();
++#if MOBILEGL_BUILD_DISAGGREGATED
++        DestroySharedImageChannelSwap();
++#endif
+ #if MOBILEGL_BUILD_DISAGGREGATED
+         DestroyWireYuvResources();
+ #endif
+diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.h b/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.h
+index 11209a6..9742f43 100644
+--- a/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.h
++++ b/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRenderer.h
+@@ -731,6 +731,9 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+         };
+         UnorderedMap<Uint64, SharedImagePresentTarget> m_sharedImagePresentTargets;
+         void DestroySharedImagePresentTargets(Bool onlyDead);
++        // The image the channel fix-up blits through (see WireSharedImage.cpp): BGRA, transfer only.
++        Bool EnsureSharedImageChannelSwap(Uint32 width, Uint32 height);
++        void DestroySharedImageChannelSwap();
+ 
+         // SHARED-IMAGE SYNCHRONIZATION (WireSharedImage.cpp). The sync_file fences other sessions
+         // publish become binary semaphores: a temporary SYNC_FD import is a WAIT, an exportable
+diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp
+index e3bf68a..e398fbb 100644
+--- a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp
++++ b/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp
+@@ -65,6 +65,85 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+         }
+     }
+ 
++#if MOBILEGL_BUILD_DISAGGREGATED
++    // The BGRA image the channel fix-up blits through. It is never sampled and never an attachment:
++    // a transfer destination for the blit, a transfer source for the copy that follows. One per
++    // device, which is one per process here (a server session is its own process), so the state
++    // stays in this file rather than on the renderer - the class layout is shared with every other
++    // translation unit and adding a member to it would be an ABI change across them.
++    namespace {
++        struct ChannelSwapTarget {
++            VkDevice Device = VK_NULL_HANDLE;
++            VkImage Image = VK_NULL_HANDLE;
++            VkDeviceMemory Memory = VK_NULL_HANDLE;
++            Uint32 Width = 0;
++            Uint32 Height = 0;
++        };
++        ChannelSwapTarget& SwapTarget() {
++            static ChannelSwapTarget target;
++            return target;
++        }
++    }
++
++    Bool VulkanRenderer::EnsureSharedImageChannelSwap(Uint32 width, Uint32 height) {
++        ChannelSwapTarget& target = SwapTarget();
++        if (target.Image != VK_NULL_HANDLE && target.Device == m_device && target.Width == width &&
++            target.Height == height)
++            return true;
++        DestroySharedImageChannelSwap();
++        VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
++        info.imageType = VK_IMAGE_TYPE_2D;
++        info.format = VK_FORMAT_B8G8R8A8_UNORM;
++        info.extent = {width, height, 1};
++        info.mipLevels = 1;
++        info.arrayLayers = 1;
++        info.samples = VK_SAMPLE_COUNT_1_BIT;
++        info.tiling = VK_IMAGE_TILING_OPTIMAL;
++        info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++        if (vkCreateImage(m_device, &info, nullptr, &target.Image) != VK_SUCCESS) {
++            target.Image = VK_NULL_HANDLE;
++            return false;
++        }
++        VkMemoryRequirements requirements{};
++        vkGetImageMemoryRequirements(m_device, target.Image, &requirements);
++        VkPhysicalDeviceMemoryProperties memoryProperties{};
++        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice.handle, &memoryProperties);
++        Uint32 type = 0xFFFFFFFFu;
++        for (Uint32 i = 0; i < memoryProperties.memoryTypeCount && type == 0xFFFFFFFFu; ++i) {
++            if ((requirements.memoryTypeBits & (1u << i)) == 0) continue;
++            if ((memoryProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0) continue;
++            type = i;
++        }
++        if (type == 0xFFFFFFFFu) {
++            DestroySharedImageChannelSwap();
++            return false;
++        }
++        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++        allocate.allocationSize = requirements.size;
++        allocate.memoryTypeIndex = type;
++        if (vkAllocateMemory(m_device, &allocate, nullptr, &target.Memory) != VK_SUCCESS ||
++            vkBindImageMemory(m_device, target.Image, target.Memory, 0) != VK_SUCCESS) {
++            if (target.Memory != VK_NULL_HANDLE) vkFreeMemory(m_device, target.Memory, nullptr);
++            vkDestroyImage(m_device, target.Image, nullptr);
++            target = ChannelSwapTarget{};
++            return false;
++        }
++        target.Device = m_device;
++        target.Width = width;
++        target.Height = height;
++        return true;
++    }
++
++    void VulkanRenderer::DestroySharedImageChannelSwap() {
++        ChannelSwapTarget& target = SwapTarget();
++        if (target.Image != VK_NULL_HANDLE) vkDestroyImage(target.Device, target.Image, nullptr);
++        if (target.Memory != VK_NULL_HANDLE) vkFreeMemory(target.Device, target.Memory, nullptr);
++        target = ChannelSwapTarget{};
++    }
++#endif
++
+     // A copy moves bytes; a blit converts through the format. The bytes are right only between
+     // formats with one memory layout, which for the RGBA8 buffers means RGBA8 itself or its sRGB
+     // twin (a blit would decode the sRGB bytes on the way).
+@@ -150,12 +229,21 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+         const Bool sameExtent = source.extent.width == view.Width && source.extent.height == view.Height;
+         const Bool halfTurn = preTransform == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR;
+         const Bool copy = sameExtent && !halfTurn && SharedImageCopiesAsIs(source.format, destination.format);
++        // THE CHANNEL-ORDER FIX-UP. An XRGB8888/ARGB8888 image names B, G, R, A in memory (that is the
++        // DRM fourcc convention these two follow), and the platform's RGBX8 allocation holds R, G, B,
++        // X. A copy would carry the bytes across unchanged, so the frame goes through a BGRA image
++        // first: the blit converts (which is the swap) and the copy that follows carries the result
++        // byte for byte. Only the X11 present routes name these two fourccs - the EGL and Android
++        // plugin routes use ABGR8888/XBGR8888, whose memory order already is R, G, B, A.
++        namespace SI = MG_Remote::Server::SharedImages;
++        const Bool swapChannels =
++            copy && (image->Fourcc == SI::kFourccXrgb8888 || image->Fourcc == SI::kFourccArgb8888);
+         // ONLY WHERE THE IMAGE DIFFERS FROM THE FRAME: an image this renderer wrote before, copied
+         // one to one (no scaling, no half turn). Its other texels must survive, so the acquire then
+         // keeps the layout the last reader released it in rather than discarding it.
+         MG_Util::Damage::Region part = region;
+         if (!part.IsFull()) part.Normalize(static_cast<Int32>(view.Width), static_cast<Int32>(view.Height));
+-        const Bool partial = !part.IsFull() && found->second.written && sameExtent && !halfTurn;
++        const Bool partial = !part.IsFull() && found->second.written && sameExtent && !halfTurn && !swapChannels;
+         // The region's rectangles, top row first and made disjoint: a copy's regions may not overlap.
+         Vector<MG_Util::Damage::Rect> rows;
+         if (partial) {
+@@ -215,7 +303,60 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+                              nullptr, 0, nullptr, 1, &acquire);
+ 
+         const VkImageSubresourceLayers layers{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+-        if (partial) {
++        if (swapChannels) {
++            VkFormatProperties swapProperties{};
++            vkGetPhysicalDeviceFormatProperties(m_physicalDevice.handle, VK_FORMAT_B8G8R8A8_UNORM, &swapProperties);
++            if ((sourceProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) == 0 ||
++                (swapProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) == 0 ||
++                !EnsureSharedImageChannelSwap(view.Width, view.Height)) {
++                MGLOG_E_ONCE("Magma: shared image %llu: the %ux%u frame cannot be blitted into a BGRA image for the "
++                             "channel fix-up; the present is declined",
++                             static_cast<unsigned long long>(view.Id), view.Width, view.Height);
++                return false;
++            }
++            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++            VkImageMemoryBarrier fill{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++            fill.srcAccessMask = 0;
++            fill.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++            // The whole frame is blitted in every time, so the previous content is discarded.
++            fill.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++            fill.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++            fill.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            fill.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            fill.image = SwapTarget().Image;
++            fill.subresourceRange = range;
++            vkCmdPipelineBarrier(frame.commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                                 0, 0, nullptr, 0, nullptr, 1, &fill);
++            VkImageBlit convert{};
++            convert.srcSubresource = layers;
++            convert.srcOffsets[1] = {static_cast<Int32>(source.extent.width),
++                                     static_cast<Int32>(source.extent.height), 1};
++            convert.dstSubresource = layers;
++            convert.dstOffsets[1] = {static_cast<Int32>(view.Width), static_cast<Int32>(view.Height), 1};
++            vkCmdBlitImage(frame.commandBuffer, source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                           SwapTarget().Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &convert,
++                           VK_FILTER_NEAREST);
++            VkImageMemoryBarrier filled{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++            filled.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++            filled.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++            filled.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++            filled.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++            filled.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            filled.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            filled.image = SwapTarget().Image;
++            filled.subresourceRange = range;
++            vkCmdPipelineBarrier(frame.commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                                 0, 0, nullptr, 0, nullptr, 1, &filled);
++            VkImageCopy carry{};
++            carry.srcSubresource = layers;
++            carry.dstSubresource = layers;
++            carry.extent = {view.Width, view.Height, 1};
++            vkCmdCopyImage(frame.commandBuffer, SwapTarget().Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                           destination.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &carry);
++            MGLOG_I_ONCE("Magma: shared image %llu: the %ux%u present carries its fourcc's channel order through a "
++                         "BGRA image (blit converts, copy carries)",
++                         static_cast<unsigned long long>(view.Id), view.Width, view.Height);
++        } else if (partial) {
+             // An empty region copies nothing: the image already is the frame.
+             if (copy && !rows.empty()) {
+                 Vector<VkImageCopy> regions;
+diff --git a/MobileGL/MG_Impl/EGLImpl/EGLImpl.cpp b/MobileGL/MG_Impl/EGLImpl/EGLImpl.cpp
+index cf45d2c..3b29e45 100644
+--- a/MobileGL/MG_Impl/EGLImpl/EGLImpl.cpp
++++ b/MobileGL/MG_Impl/EGLImpl/EGLImpl.cpp
+@@ -10,6 +10,10 @@
+ #include "EGLPlatformExtensions.h"
+ #include "SharedImageFlushPolicy.h"
+ #include "WaylandWindow.h"
++#if defined(__linux__) && !defined(__ANDROID__)
++// EGL window surfaces on an X server ride the GLX chain (X11 present); see X11WindowPresent.h.
++#include "../GLXImpl/X11WindowPresent.h"
++#endif
+ #include "../GetProcAddress.h"
+ #include <Init.h>
+ #include <MG_Backend/BackendObjects.h>
+@@ -316,6 +320,70 @@ namespace MobileGL::MG_Impl::EGLImpl {
+ #endif
+         }
+ 
++#if defined(__linux__) && !defined(__ANDROID__)
++        // What an EGL window surface on an X server needs to know: which connection, which window,
++        // and the drawable's geometry. False when this is not an X window at all.
++        struct X11WindowTarget {
++            void* Display = nullptr;
++            Uint64 Window = 0;
++            Uint32 Width = 0;
++            Uint32 Height = 0;
++            Uint32 Depth = 0;
++        };
++
++        Bool ResolveX11WindowTarget(MG_State::EGLState::EGLContext* state, EGLDisplay dpy, NativeWindowType window,
++                                    X11WindowTarget* target) {
++            constexpr EGLenum kPlatformX11 = 0x31D5;
++            Uint64 nativeDisplay = 0;
++            EGLenum platform = EGL_NONE;
++            if (state == nullptr || target == nullptr) return false;
++            if (!state->GetDisplayNative(dpy, &nativeDisplay, &platform)) return false;
++            MGLOG_I("egl: window target: platform=0x%x nativeDisplay=0x%llx", platform,
++                    static_cast<unsigned long long>(nativeDisplay));
++            // EGL_NONE is what a client that named its own Display to eglGetDisplay got; the X11
++            // platform is the one it asked for by name. Anything else (Wayland, GBM, surfaceless)
++            // is not a window this can put a pixmap on.
++            if (platform != EGL_NONE && platform != kPlatformX11) return false;
++            void* xDisplay = nativeDisplay == 0
++                                 ? GLXImpl::X11WindowPresent::DefaultXDisplay()
++                                 : reinterpret_cast<void*>(static_cast<uintptr_t>(nativeDisplay));
++            if (xDisplay == nullptr) return false;
++            // NativeWindowType is an X Window id (integral) on X11 and a pointer elsewhere; one cast
++            // covers both, and ToVoidHandle is declared further down this file.
++            Uint64 xWindow = static_cast<Uint64>(static_cast<uintptr_t>(window));
++            if (xWindow == 0) return false;
++            Uint32 width = 0;
++            Uint32 height = 0;
++            Uint32 depth = 0;
++            const Bool direct = GLXImpl::X11WindowPresent::QueryGeometry(xDisplay, xWindow, &width, &height, &depth);
++            if (!direct) {
++                // EGL_EXT_platform_x11 hands the window over as a Window; some clients (mpv, and every
++                // ANGLE-mediated path) hand over a POINTER to it instead. An X id is a 32-bit value, so
++                // anything wider than that is a pointer: read the id out of it and try again.
++                if ((xWindow & 0xFFFFFFFF00000000ull) != 0) {
++                    const auto* bytes = reinterpret_cast<const unsigned char*>(static_cast<uintptr_t>(xWindow));
++                    const Uint64 wide = *reinterpret_cast<const Uint64*>(bytes);
++                    const Uint32 narrow = *reinterpret_cast<const Uint32*>(bytes);
++                    if (GLXImpl::X11WindowPresent::QueryGeometry(xDisplay, wide, &width, &height, &depth)) {
++                        xWindow = wide;
++                    } else if (GLXImpl::X11WindowPresent::QueryGeometry(xDisplay, narrow, &width, &height, &depth)) {
++                        xWindow = narrow;
++                    } else {
++                        return false;
++                    }
++                } else {
++                    return false;
++                }
++            }
++            target->Display = xDisplay;
++            target->Window = xWindow;
++            target->Width = width;
++            target->Height = height;
++            target->Depth = depth;
++            return true;
++        }
++#endif
++
+         EGLint GetAttribValue(const EGLint* attribList, EGLint attrib, EGLint defaultValue) {
+             if (!attribList) {
+                 return defaultValue;
+@@ -693,6 +761,33 @@ namespace MobileGL::MG_Impl::EGLImpl {
+                         nativeWidth, nativeHeight);
+             }
+         }
++#endif
++#if defined(__linux__) && !defined(__ANDROID__)
++        // An X window knows its size and depth; a window surface made for it must render at that
++        // size (the caller usually names none) and then present into the same window GLX presents
++        // into - one chain, two APIs.
++        X11WindowTarget x11Target{};
++        const Bool x11Window = ResolveX11WindowTarget(state, dpy, window, &x11Target);
++        if (x11Window) {
++            if (requestedWidth == 0) requestedWidth = x11Target.Width;
++            if (requestedHeight == 0) requestedHeight = x11Target.Height;
++            MGLOG_I("eglCreateWindowSurface: window 0x%llx is %ux%u (depth %u); the surface renders at that size",
++                    static_cast<unsigned long long>(x11Target.Window), x11Target.Width, x11Target.Height,
++                    x11Target.Depth);
++            // The frame is drawn offscreen and handed to the X server afterwards, exactly as a GLX
++            // window's is: a window id from this X connection means nothing to a server that draws
++            // on another platform (a split client's server is an Android process). A window surface
++            // here is a pbuffer plus a present chain.
++            const EGLint x11PbufferAttribs[] = {EGL_WIDTH, static_cast<EGLint>(requestedWidth), EGL_HEIGHT,
++                                                static_cast<EGLint>(requestedHeight), EGL_NONE};
++            EGLSurface x11Surface = CreatePbufferSurface(dpy, config, x11PbufferAttribs);
++            if (x11Surface == EGL_NO_SURFACE) {
++                return EGL_NO_SURFACE;
++            }
++            GLXImpl::X11WindowPresent::Attach(dpy, x11Surface, x11Target.Display, x11Target.Window, requestedWidth,
++                                              requestedHeight, x11Target.Depth);
++            return x11Surface;
++        }
+ #endif
+         const MG_Backend::WindowHandle windowHandle = {
+             .Backend = DetectWindowBackend(),
+@@ -752,6 +847,11 @@ namespace MobileGL::MG_Impl::EGLImpl {
+             state->SetError(EGL_BAD_SURFACE);
+             return EGL_FALSE;
+         }
++#if defined(__linux__) && !defined(__ANDROID__)
++        // Before the swap: the chain copies what the draw framebuffer holds right now, exactly where
++        // glXSwapBuffers does it for a GLX window. A surface that is not an X window does nothing.
++        GLXImpl::X11WindowPresent::Present(dpy, draw);
++#endif
+ #if MOBILEGL_BUILD_DISAGGREGATED
+         // A swap of a lost context's frame: EGL_CONTEXT_LOST (EGL 1.5 3.2), and nothing presented.
+         // A Wayland window is still committed, with no new buffer (WindowSurface::CommitPendingState):
+@@ -1168,6 +1268,9 @@ namespace MobileGL::MG_Impl::EGLImpl {
+         if (!state->DestroySurface(dpy, surface)) {
+             return EGL_FALSE;
+         }
++#if defined(__linux__) && !defined(__ANDROID__)
++        GLXImpl::X11WindowPresent::Detach(surface);
++#endif
+         DamageRegionSurfaces().erase(surface);
+ #if MOBILEGL_WAYLAND_WINDOWS
+         WaylandSurfaces().erase(surface);
+@@ -1974,6 +2077,37 @@ namespace MobileGL::MG_Impl::EGLImpl {
+             return EGL_NO_SURFACE;
+         }
+ 
++#if defined(__linux__) && !defined(__ANDROID__)
++        // The platform variant of a window surface (EGL_EXT_platform_base) on an X server: same
++        // treatment as CreateWindowSurface - render offscreen at the window's size and present
++        // through the chain, because this client's server draws on another platform.
++        {
++            X11WindowTarget x11Target{};
++            const auto x11Window = static_cast<NativeWindowType>(reinterpret_cast<uintptr_t>(native_window));
++            if (ResolveX11WindowTarget(state, dpy, x11Window, &x11Target)) {
++                Uint32 width = static_cast<Uint32>(
++                    std::max<EGLint>(GetAttribValueAttrib(attrib_list, EGL_WIDTH, 0), 0));
++                Uint32 height = static_cast<Uint32>(
++                    std::max<EGLint>(GetAttribValueAttrib(attrib_list, EGL_HEIGHT, 0), 0));
++                if (width == 0) width = x11Target.Width;
++                if (height == 0) height = x11Target.Height;
++                if (width > 16384) width = 16384;
++                if (height > 16384) height = 16384;
++                const EGLint x11PbufferAttribs[] = {EGL_WIDTH, static_cast<EGLint>(width), EGL_HEIGHT,
++                                                    static_cast<EGLint>(height), EGL_NONE};
++                EGLSurface x11Surface = CreatePbufferSurface(dpy, config, x11PbufferAttribs);
++                if (x11Surface == EGL_NO_SURFACE) {
++                    return EGL_NO_SURFACE;
++                }
++                GLXImpl::X11WindowPresent::Attach(dpy, x11Surface, x11Target.Display, x11Target.Window, width, height,
++                                                  x11Target.Depth);
++                MGLOG_I("eglCreatePlatformWindowSurface: window 0x%llx is %ux%u (depth %u); offscreen + present chain",
++                        static_cast<unsigned long long>(x11Target.Window), width, height, x11Target.Depth);
++                return x11Surface;
++            }
++        }
++#endif
++
+         const MG_Backend::WindowHandle windowHandle = {
+             .Backend = DetectWindowBackend(),
+             .Handle = native_window,
+diff --git a/MobileGL/MG_Impl/EGLImpl/WaylandWindow.cpp b/MobileGL/MG_Impl/EGLImpl/WaylandWindow.cpp
+index 0047184..2fb4e73 100644
+--- a/MobileGL/MG_Impl/EGLImpl/WaylandWindow.cpp
++++ b/MobileGL/MG_Impl/EGLImpl/WaylandWindow.cpp
+@@ -50,6 +50,17 @@ namespace MobileGL::MG_Impl::EGLImpl {
+         const SizeT rowBytes = static_cast<SizeT>(width) * 4;
+         scratch.resize(rowBytes * static_cast<SizeT>(height));
+         GL::ReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, scratch.data());
++        {
++            GLint vp[4] = {0, 0, 0, 0};
++            GLint drawFb = 0;
++            GL::GetIntegerv(GL_VIEWPORT, vp);
++            GL::GetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFb);
++            const SizeT mid = (static_cast<SizeT>(height) / 2) * rowBytes + (static_cast<SizeT>(width) / 2) * 4;
++            MGLOG_I("present-readback: %dx%d viewport=%d,%d,%d,%d drawFb=%d savedReadFb=%d first=%u,%u,%u,%u mid=%u,%u,%u,%u err=0x%x",
++                    width, height, vp[0], vp[1], vp[2], vp[3], drawFb, readFramebuffer,
++                    scratch[0], scratch[1], scratch[2], scratch[3],
++                    scratch[mid], scratch[mid + 1], scratch[mid + 2], scratch[mid + 3], GL::GetError());
++        }
+         GL::PixelStorei(GL_PACK_ALIGNMENT, alignment);
+         GL::PixelStorei(GL_PACK_ROW_LENGTH, rowLength);
+         GL::PixelStorei(GL_PACK_SKIP_ROWS, skipRows);
+diff --git a/MobileGL/MG_Impl/GLImpl/Exporting/Definitions.cpp b/MobileGL/MG_Impl/GLImpl/Exporting/Definitions.cpp
+index 1270df3..5caa9a1 100644
+--- a/MobileGL/MG_Impl/GLImpl/Exporting/Definitions.cpp
++++ b/MobileGL/MG_Impl/GLImpl/Exporting/Definitions.cpp
+@@ -7,6 +7,7 @@
+ // End of Source File Header
+ 
+ #include <Includes.h>
++#include <cmath>
+ #include "../Buffer/GL_Buffer.h"
+ #include "../Getter/GL_Getter.h"
+ #include "../Sampler/GL_Sampler.h"
+@@ -66,6 +67,293 @@
+     }
+ #endif
+ 
++// ─── 兼容档矩阵栈（固定管线的 glMatrixMode / glOrtho 一族）──────────────────────
++// MobileGL 把这些入口实现成空 stub，于是任何用兼容档 GLSL 的程序都拿不到矩阵。
++// LOVE 0.10 的 shader 就是这么写的：
++//     #define TransformProjectionMatrix gl_ModelViewProjectionMatrix
++// 而 #version 已被规范化成 330 core，内建名在 Vulkan glslang 下根本不存在，直接
++// 报 'gl_ModelViewProjectionMatrix' : undeclared identifier。
++// 这里补上矩阵栈；ShaderSourceProcessor 会把那几个内建名改写成 mg_* 的 uniform，
++// 每次 draw 之前由 CompatUploadImplicitUniforms 灌值。老程序一行代码都不用改。
++namespace {
++    constexpr int kCompatModeModelView = 0x1700;  // GL_MODELVIEW
++    constexpr int kCompatModeProjection = 0x1701; // GL_PROJECTION
++    constexpr int kCompatModeTexture = 0x1702;    // GL_TEXTURE
++
++    struct CompatMatrixState {
++        float Mat[3][16];
++        int Depth[3];
++        float Stack[3][32][16];
++        int Mode;
++        unsigned long long Generation;
++    };
++
++    CompatMatrixState& CompatState() {
++        static CompatMatrixState state{};
++        static bool ready = false;
++        if (!ready) {
++            ready = true;
++            for (int m = 0; m < 3; ++m) {
++                for (int i = 0; i < 16; ++i) state.Mat[m][i] = (i % 5 == 0) ? 1.0f : 0.0f;
++                state.Depth[m] = 0;
++            }
++            state.Mode = kCompatModeModelView;
++            state.Generation = 1;
++        }
++        return state;
++    }
++
++    int CompatModeIndex(int mode) {
++        switch (mode) {
++        case kCompatModeProjection: return 1;
++        case kCompatModeTexture: return 2;
++        default: return 0;
++        }
++    }
++
++    // 列主序 4x4：out = a * b
++    void CompatMultiply(float* out, const float* a, const float* b) {
++        for (int c = 0; c < 4; ++c) {
++            for (int r = 0; r < 4; ++r) {
++                float sum = 0.0f;
++                for (int k = 0; k < 4; ++k) sum += a[k * 4 + r] * b[c * 4 + k];
++                out[c * 4 + r] = sum;
++            }
++        }
++    }
++
++    void CompatMultCurrent(const float* m) {
++        CompatMatrixState& st = CompatState();
++        float out[16];
++        CompatMultiply(out, st.Mat[CompatModeIndex(st.Mode)], m);
++        for (int i = 0; i < 16; ++i) st.Mat[CompatModeIndex(st.Mode)][i] = out[i];
++        ++st.Generation;
++    }
++
++    void CompatLoadCurrent(const float* m) {
++        CompatMatrixState& st = CompatState();
++        for (int i = 0; i < 16; ++i) st.Mat[CompatModeIndex(st.Mode)][i] = m[i];
++        ++st.Generation;
++    }
++
++    void CompatLoadIdentity() {
++        float identity[16];
++        for (int i = 0; i < 16; ++i) identity[i] = (i % 5 == 0) ? 1.0f : 0.0f;
++        CompatLoadCurrent(identity);
++    }
++
++    // 3x3 逆转置，取 ModelView 左上角（gl_NormalMatrix 的定义）
++    void CompatNormalMatrix(float* out3x3) {
++        const float* m = CompatState().Mat[0];
++        const float a = m[0], b = m[4], c = m[8];
++        const float d = m[1], e = m[5], f = m[9];
++        const float g = m[2], h = m[6], i = m[10];
++        const float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
++        if (det == 0.0f) {
++            out3x3[0] = 1; out3x3[1] = 0; out3x3[2] = 0;
++            out3x3[3] = 0; out3x3[4] = 1; out3x3[5] = 0;
++            out3x3[6] = 0; out3x3[7] = 0; out3x3[8] = 1;
++            return;
++        }
++        const float inv = 1.0f / det;
++        // 逆转置，列主序写入
++        out3x3[0] = (e * i - f * h) * inv;
++        out3x3[1] = (f * g - d * i) * inv;
++        out3x3[2] = (d * h - e * g) * inv;
++        out3x3[3] = (c * h - b * i) * inv;
++        out3x3[4] = (a * i - c * g) * inv;
++        out3x3[5] = (b * g - a * h) * inv;
++        out3x3[6] = (b * f - c * e) * inv;
++        out3x3[7] = (c * d - a * f) * inv;
++        out3x3[8] = (a * e - b * d) * inv;
++    }
++
++    // 当前程序由 glUseProgram 记账，避免为了拿它再进一次 GL 状态机
++    GLuint g_CompatCurrentProgram = 0;
++
++    struct CompatUniformCacheEntry {
++        GLuint Program;
++        GLint Mvp;
++        GLint Mv;
++        GLint Projection;
++        GLint Normal;
++        unsigned long long Generation;
++    };
++    CompatUniformCacheEntry g_CompatUniforms[64];
++    int g_CompatUniformCount = 0;
++
++    void CompatUploadImplicitUniforms() {
++        if (g_CompatCurrentProgram == 0) return;
++        CompatMatrixState& st = CompatState();
++
++        CompatUniformCacheEntry* entry = nullptr;
++        for (int i = 0; i < g_CompatUniformCount; ++i) {
++            if (g_CompatUniforms[i].Program == g_CompatCurrentProgram) {
++                entry = &g_CompatUniforms[i];
++                break;
++            }
++        }
++        if (entry == nullptr) {
++            if (g_CompatUniformCount >= 64) return;
++            entry = &g_CompatUniforms[g_CompatUniformCount++];
++            entry->Program = g_CompatCurrentProgram;
++            entry->Mvp = MobileGL::MG_Impl::GLImpl::GetUniformLocation(
++                g_CompatCurrentProgram, "mg_ModelViewProjectionMatrix");
++            entry->Mv = MobileGL::MG_Impl::GLImpl::GetUniformLocation(
++                g_CompatCurrentProgram, "mg_ModelViewMatrix");
++            entry->Projection = MobileGL::MG_Impl::GLImpl::GetUniformLocation(
++                g_CompatCurrentProgram, "mg_ProjectionMatrix");
++            entry->Normal = MobileGL::MG_Impl::GLImpl::GetUniformLocation(
++                g_CompatCurrentProgram, "mg_NormalMatrix");
++            entry->Generation = 0;
++            MGLOG_D("compat matrices: program %u wants mvp=%d mv=%d proj=%d normal=%d",
++                    g_CompatCurrentProgram, entry->Mvp, entry->Mv, entry->Projection, entry->Normal);
++        }
++        if (entry->Generation == st.Generation) return;
++        entry->Generation = st.Generation;
++        if (entry->Mvp < 0 && entry->Mv < 0 && entry->Projection < 0 && entry->Normal < 0) return;
++
++        float mvp[16];
++        CompatMultiply(mvp, st.Mat[1], st.Mat[0]);
++        if (entry->Mvp >= 0) MobileGL::MG_Impl::GLImpl::UniformMatrix4fv(entry->Mvp, 1, GL_FALSE, mvp);
++        if (entry->Mv >= 0) MobileGL::MG_Impl::GLImpl::UniformMatrix4fv(entry->Mv, 1, GL_FALSE, st.Mat[0]);
++        if (entry->Projection >= 0)
++            MobileGL::MG_Impl::GLImpl::UniformMatrix4fv(entry->Projection, 1, GL_FALSE, st.Mat[1]);
++        if (entry->Normal >= 0) {
++            float normal[9];
++            CompatNormalMatrix(normal);
++            MobileGL::MG_Impl::GLImpl::UniformMatrix3fv(entry->Normal, 1, GL_FALSE, normal);
++        }
++    }
++
++    void CompatOrthoCurrent(double l, double r, double b, double t, double n, double f) {
++        float m[16] = {0};
++        m[0] = (float)(2.0 / (r - l));
++        m[5] = (float)(2.0 / (t - b));
++        m[10] = (float)(-2.0 / (f - n));
++        m[12] = (float)(-(r + l) / (r - l));
++        m[13] = (float)(-(t + b) / (t - b));
++        m[14] = (float)(-(f + n) / (f - n));
++        m[15] = 1.0f;
++        CompatMultCurrent(m);
++    }
++
++    void CompatFrustumCurrent(double l, double r, double b, double t, double n, double f) {
++        float m[16] = {0};
++        m[0] = (float)(2.0 * n / (r - l));
++        m[5] = (float)(2.0 * n / (t - b));
++        m[8] = (float)((r + l) / (r - l));
++        m[9] = (float)((t + b) / (t - b));
++        m[10] = (float)(-(f + n) / (f - n));
++        m[11] = -1.0f;
++        m[14] = (float)(-2.0 * f * n / (f - n));
++        CompatMultCurrent(m);
++    }
++
++    void CompatRotateCurrent(double angle, double x, double y, double z) {
++        const double len = std::sqrt(x * x + y * y + z * z);
++        if (len == 0.0) return;
++        x /= len; y /= len; z /= len;
++        const double rad = angle * 3.14159265358979323846 / 180.0;
++        const double c = std::cos(rad), s = std::sin(rad);
++        float m[16] = {0};
++        m[0] = (float)(x * x * (1 - c) + c);
++        m[1] = (float)(y * x * (1 - c) + z * s);
++        m[2] = (float)(x * z * (1 - c) - y * s);
++        m[4] = (float)(x * y * (1 - c) - z * s);
++        m[5] = (float)(y * y * (1 - c) + c);
++        m[6] = (float)(y * z * (1 - c) + x * s);
++        m[8] = (float)(x * z * (1 - c) + y * s);
++        m[9] = (float)(y * z * (1 - c) - x * s);
++        m[10] = (float)(z * z * (1 - c) + c);
++        m[15] = 1.0f;
++        CompatMultCurrent(m);
++    }
++
++    void CompatScaleCurrent(double x, double y, double z) {
++        float m[16] = {0};
++        m[0] = (float)x; m[5] = (float)y; m[10] = (float)z; m[15] = 1.0f;
++        CompatMultCurrent(m);
++    }
++
++    void CompatTranslateCurrent(double x, double y, double z) {
++        float m[16] = {0};
++        m[0] = 1; m[5] = 1; m[10] = 1; m[15] = 1;
++        m[12] = (float)x; m[13] = (float)y; m[14] = (float)z;
++        CompatMultCurrent(m);
++    }
++} // namespace
++
++MOBILEGL_GL_API void glMatrixMode(GLenum mode) {
++    CompatMatrixState& st = CompatState();
++    st.Mode = (int)mode;
++}
++
++MOBILEGL_GL_API void glLoadIdentity() { CompatLoadIdentity(); }
++
++MOBILEGL_GL_API void glLoadMatrixf(const GLfloat* m) {
++    if (m != nullptr) CompatLoadCurrent(m);
++}
++
++MOBILEGL_GL_API void glLoadMatrixd(const GLdouble* m) {
++    if (m == nullptr) return;
++    float f[16];
++    for (int i = 0; i < 16; ++i) f[i] = (float)m[i];
++    CompatLoadCurrent(f);
++}
++
++MOBILEGL_GL_API void glMultMatrixf(const GLfloat* m) {
++    if (m != nullptr) CompatMultCurrent(m);
++}
++
++MOBILEGL_GL_API void glMultMatrixd(const GLdouble* m) {
++    if (m == nullptr) return;
++    float f[16];
++    for (int i = 0; i < 16; ++i) f[i] = (float)m[i];
++    CompatMultCurrent(f);
++}
++
++MOBILEGL_GL_API void glPushMatrix() {
++    CompatMatrixState& st = CompatState();
++    const int idx = CompatModeIndex(st.Mode);
++    if (st.Depth[idx] >= 31) return;
++    for (int i = 0; i < 16; ++i) st.Stack[idx][st.Depth[idx]][i] = st.Mat[idx][i];
++    ++st.Depth[idx];
++}
++
++MOBILEGL_GL_API void glPopMatrix() {
++    CompatMatrixState& st = CompatState();
++    const int idx = CompatModeIndex(st.Mode);
++    if (st.Depth[idx] <= 0) return;
++    --st.Depth[idx];
++    for (int i = 0; i < 16; ++i) st.Mat[idx][i] = st.Stack[idx][st.Depth[idx]][i];
++    ++st.Generation;
++}
++
++MOBILEGL_GL_API void glOrtho(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) {
++    CompatOrthoCurrent(l, r, b, t, n, f);
++}
++
++MOBILEGL_GL_API void glFrustum(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) {
++    CompatFrustumCurrent(l, r, b, t, n, f);
++}
++
++MOBILEGL_GL_API void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
++    CompatRotateCurrent(angle, x, y, z);
++}
++
++MOBILEGL_GL_API void glRotated(GLdouble angle, GLdouble x, GLdouble y, GLdouble z) {
++    CompatRotateCurrent(angle, x, y, z);
++}
++
++MOBILEGL_GL_API void glScalef(GLfloat x, GLfloat y, GLfloat z) { CompatScaleCurrent(x, y, z); }
++
++MOBILEGL_GL_API void glScaled(GLdouble x, GLdouble y, GLdouble z) { CompatScaleCurrent(x, y, z); }
++
++MOBILEGL_GL_API void glTranslatef(GLfloat x, GLfloat y, GLfloat z) { CompatTranslateCurrent(x, y, z); }
++
++MOBILEGL_GL_API void glTranslated(GLdouble x, GLdouble y, GLdouble z) { CompatTranslateCurrent(x, y, z); }
++
+ DECLARE_GL_FUNCTION_HEAD(const GLubyte*, GetStringi, GLenum name, GLuint index) DECLARE_GL_FUNCTION_END(const GLubyte*, GetStringi, name, index)
+ DECLARE_GL_FUNCTION_HEAD(const GLubyte*, GetString, GLenum name) DECLARE_GL_FUNCTION_END(const GLubyte*, GetString, name)
+ DECLARE_GL_FUNCTION_HEAD(void*, MapBuffer, GLenum target, GLenum access) DECLARE_GL_FUNCTION_END(void*, MapBuffer, target, access)
+@@ -110,8 +398,16 @@ DECLARE_GL_FUNCTION_HEAD(void, DepthRangef, GLfloat n, GLfloat f) DECLARE_GL_FUN
+ DECLARE_GL_FUNCTION_HEAD(void, DetachShader, GLuint program, GLuint shader) DECLARE_GL_FUNCTION_END_NO_RETURN(void, DetachShader, program, shader)
+ DECLARE_GL_FUNCTION_HEAD(void, Disable, GLenum cap) DECLARE_GL_FUNCTION_END_NO_RETURN(void, Disable, cap)
+ DECLARE_GL_FUNCTION_HEAD(void, DisableVertexAttribArray, GLuint index) DECLARE_GL_FUNCTION_END_NO_RETURN(void, DisableVertexAttribArray, index)
+-DECLARE_GL_FUNCTION_HEAD(void, DrawArrays, GLenum mode, GLint first, GLsizei count) DECLARE_GL_FUNCTION_END_NO_RETURN(void, DrawArrays, mode, first, count)
+-DECLARE_GL_FUNCTION_HEAD(void, DrawElements, GLenum mode, GLsizei count, GLenum type, const void* indices) DECLARE_GL_FUNCTION_END_NO_RETURN(void, DrawElements, mode, count, type, indices)
++MOBILEGL_GL_API void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
++    const MobileGL::MG_Impl::EGLImpl::GLStreamScope mglStreamScope;
++    CompatUploadImplicitUniforms();
++    MobileGL::MG_Impl::GLImpl::DrawArrays(mode, first, count);
++}
++MOBILEGL_GL_API void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
++    const MobileGL::MG_Impl::EGLImpl::GLStreamScope mglStreamScope;
++    CompatUploadImplicitUniforms();
++    MobileGL::MG_Impl::GLImpl::DrawElements(mode, count, type, indices);
++}
+ DECLARE_GL_FUNCTION_HEAD(void, Enable, GLenum cap) DECLARE_GL_FUNCTION_END_NO_RETURN(void, Enable, cap)
+ DECLARE_GL_FUNCTION_HEAD(void, EnableVertexAttribArray, GLuint index) DECLARE_GL_FUNCTION_END_NO_RETURN(void, EnableVertexAttribArray, index)
+ // P5e (ra), CONTRACT-P5E §2.5. STILL NOTHING ON THE WIRE - Flush and Finish have no record
+@@ -226,7 +522,11 @@ DECLARE_GL_FUNCTION_HEAD(void, Uniform4iv, GLint location, GLsizei count, const
+ DECLARE_GL_FUNCTION_HEAD(void, UniformMatrix2fv, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) DECLARE_GL_FUNCTION_END_NO_RETURN(void, UniformMatrix2fv, location, count, transpose, value)
+ DECLARE_GL_FUNCTION_HEAD(void, UniformMatrix3fv, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) DECLARE_GL_FUNCTION_END_NO_RETURN(void, UniformMatrix3fv, location, count, transpose, value)
+ DECLARE_GL_FUNCTION_HEAD(void, UniformMatrix4fv, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) DECLARE_GL_FUNCTION_END_NO_RETURN(void, UniformMatrix4fv, location, count, transpose, value)
+-DECLARE_GL_FUNCTION_HEAD(void, UseProgram, GLuint program) DECLARE_GL_FUNCTION_END_NO_RETURN(void, UseProgram, program)
++MOBILEGL_GL_API void glUseProgram(GLuint program) {
++    const MobileGL::MG_Impl::EGLImpl::GLStreamScope mglStreamScope;
++    g_CompatCurrentProgram = program;
++    MobileGL::MG_Impl::GLImpl::UseProgram(program);
++}
+ DECLARE_GL_FUNCTION_HEAD(void, ValidateProgram, GLuint program) DECLARE_GL_FUNCTION_END_NO_RETURN(void, ValidateProgram, program)
+ DECLARE_GL_FUNCTION_HEAD(void, VertexAttrib1f, GLuint index, GLfloat x) DECLARE_GL_FUNCTION_END_NO_RETURN(void, VertexAttrib1f, index, x)
+ DECLARE_GL_FUNCTION_HEAD(void, VertexAttrib1fv, GLuint index, const GLfloat* v) DECLARE_GL_FUNCTION_END_NO_RETURN(void, VertexAttrib1fv, index, v)
+@@ -305,8 +605,16 @@ DECLARE_GL_FUNCTION_HEAD(GLuint, GetUniformBlockIndex, GLuint program, const GLc
+ DECLARE_GL_FUNCTION_HEAD(void, GetActiveUniformBlockiv, GLuint program, GLuint uniformBlockIndex, GLenum pname, GLint* params) DECLARE_GL_FUNCTION_END_NO_RETURN(void, GetActiveUniformBlockiv, program, uniformBlockIndex, pname, params)
+ DECLARE_GL_FUNCTION_HEAD(void, GetActiveUniformBlockName, GLuint program, GLuint uniformBlockIndex, GLsizei bufSize, GLsizei* length, GLchar* uniformBlockName) DECLARE_GL_FUNCTION_END_NO_RETURN(void, GetActiveUniformBlockName, program, uniformBlockIndex, bufSize, length, uniformBlockName)
+ DECLARE_GL_FUNCTION_HEAD(void, UniformBlockBinding, GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding) DECLARE_GL_FUNCTION_END_NO_RETURN(void, UniformBlockBinding, program, uniformBlockIndex, uniformBlockBinding)
+-DECLARE_GL_FUNCTION_HEAD(void, DrawArraysInstanced, GLenum mode, GLint first, GLsizei count, GLsizei instancecount) DECLARE_GL_FUNCTION_END_NO_RETURN(void, DrawArraysInstanced, mode, first, count, instancecount)
+-DECLARE_GL_FUNCTION_HEAD(void, DrawElementsInstanced, GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount) DECLARE_GL_FUNCTION_END_NO_RETURN(void, DrawElementsInstanced, mode, count, type, indices, instancecount)
++MOBILEGL_GL_API void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount) {
++    const MobileGL::MG_Impl::EGLImpl::GLStreamScope mglStreamScope;
++    CompatUploadImplicitUniforms();
++    MobileGL::MG_Impl::GLImpl::DrawArraysInstanced(mode, first, count, instancecount);
++}
++MOBILEGL_GL_API void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount) {
++    const MobileGL::MG_Impl::EGLImpl::GLStreamScope mglStreamScope;
++    CompatUploadImplicitUniforms();
++    MobileGL::MG_Impl::GLImpl::DrawElementsInstanced(mode, count, type, indices, instancecount);
++}
+ DECLARE_GL_FUNCTION_HEAD(GLsync, FenceSync, GLenum condition, GLbitfield flags) DECLARE_GL_FUNCTION_END(GLsync, FenceSync, condition, flags)
+ DECLARE_GL_FUNCTION_HEAD(GLboolean, IsSync, GLsync sync) DECLARE_GL_FUNCTION_END(GLboolean, IsSync, sync)
+ DECLARE_GL_FUNCTION_HEAD(void, DeleteSync, GLsync sync) DECLARE_GL_FUNCTION_END_NO_RETURN(void, DeleteSync, sync)
+@@ -483,22 +791,6 @@ DECLARE_GL_FUNCTION_STUB_HEAD(GLint, RenderMode, GLenum mode) DECLARE_GL_FUNCTIO
+ DECLARE_GL_FUNCTION_HEAD(void, DepthRange, GLclampd near_val, GLclampd far_val) DECLARE_GL_FUNCTION_END_NO_RETURN(void, DepthRange, near_val, far_val)
+ DECLARE_GL_FUNCTION_STUB_HEAD(void, ClearAccum, GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, ClearAccum, red, green, blue, alpha)
+ DECLARE_GL_FUNCTION_STUB_HEAD(void, Accum, GLenum op, GLfloat value) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, Accum, op, value)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, MatrixMode, GLenum mode) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, MatrixMode, mode)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, Ortho, GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, Ortho, left, right, bottom, top, near_val, far_val)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, Frustum, GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, Frustum, left, right, bottom, top, near_val, far_val)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, PushMatrix) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, PushMatrix)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, PopMatrix) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, PopMatrix)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, LoadIdentity) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, LoadIdentity)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, LoadMatrixd, const GLdouble* m) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, LoadMatrixd, m)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, LoadMatrixf, const GLfloat* m) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, LoadMatrixf, m)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, MultMatrixd, const GLdouble* m) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, MultMatrixd, m)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, MultMatrixf, const GLfloat* m) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, MultMatrixf, m)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, Rotated, GLdouble ane, GLdouble x, GLdouble y, GLdouble z) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, Rotated, ane, x, y, z)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, Rotatef, GLfloat ane, GLfloat x, GLfloat y, GLfloat z) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, Rotatef, ane, x, y, z)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, Scaled, GLdouble x, GLdouble y, GLdouble z) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, Scaled, x, y, z)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, Scalef, GLfloat x, GLfloat y, GLfloat z) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, Scalef, x, y, z)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, Translated, GLdouble x, GLdouble y, GLdouble z) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, Translated, x, y, z)
+-DECLARE_GL_FUNCTION_STUB_HEAD(void, Translatef, GLfloat x, GLfloat y, GLfloat z) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, Translatef, x, y, z)
+ DECLARE_GL_FUNCTION_STUB_HEAD(GLboolean, IsList, GLuint list) DECLARE_GL_FUNCTION_STUB_END(GLboolean, IsList, list)
+ DECLARE_GL_FUNCTION_STUB_HEAD(void, DeleteLists, GLuint list, GLsizei range) DECLARE_GL_FUNCTION_STUB_END_NO_RETURN(void, DeleteLists, list, range)
+ DECLARE_GL_FUNCTION_STUB_HEAD(GLuint, GenLists, GLsizei range) DECLARE_GL_FUNCTION_STUB_END(GLuint, GenLists, range)
+diff --git a/MobileGL/MG_Impl/GLImpl/Texture/GL_Texture.cpp b/MobileGL/MG_Impl/GLImpl/Texture/GL_Texture.cpp
+index 4268e63..b990a00 100644
+--- a/MobileGL/MG_Impl/GLImpl/Texture/GL_Texture.cpp
++++ b/MobileGL/MG_Impl/GLImpl/Texture/GL_Texture.cpp
+@@ -2170,6 +2170,16 @@ namespace MobileGL::MG_Impl::GLImpl {
+             textureObject->SetSwizzleParamRGBA({TextureSwizzleParam::Zero, TextureSwizzleParam::Zero,
+                                                 TextureSwizzleParam::Zero, TextureSwizzleParam::Red});
+         }
++        // 兼容档亮度格式：存储被降级成 R8 / RG8（见 ConvertGLEnumToTextureInternalFormat），
++        // 采样时用通道重排把单通道亮度铺成灰色、双通道铺成 (L,L,L,A)。老程序的字体图集与蒙版
++        // 纹理都走这条路（LOVE 0.10 用 GL_LUMINANCE8_ALPHA8，不认就直接抛异常）。
++        else if (internalformat == GL_LUMINANCE_ALPHA || format == GL_LUMINANCE_ALPHA) {
++            textureObject->SetSwizzleParamRGBA({TextureSwizzleParam::Red, TextureSwizzleParam::Red,
++                                                TextureSwizzleParam::Red, TextureSwizzleParam::Green});
++        } else if (internalformat == GL_LUMINANCE || format == GL_LUMINANCE) {
++            textureObject->SetSwizzleParamRGBA({TextureSwizzleParam::Red, TextureSwizzleParam::Red,
++                                                TextureSwizzleParam::Red, TextureSwizzleParam::One});
++        }
+ 
+         SizeT imageSize = 0;
+         const SizeT inputBpp = MG_Util::GetInputBytesPerPixel(textureInputFormat, texturePixelDataType);
+@@ -2313,6 +2323,16 @@ namespace MobileGL::MG_Impl::GLImpl {
+             textureObject->SetSwizzleParamRGBA({TextureSwizzleParam::Zero, TextureSwizzleParam::Zero,
+                                                 TextureSwizzleParam::Zero, TextureSwizzleParam::Red});
+         }
++        // 兼容档亮度格式：存储被降级成 R8 / RG8（见 ConvertGLEnumToTextureInternalFormat），
++        // 采样时用通道重排把单通道亮度铺成灰色、双通道铺成 (L,L,L,A)。老程序的字体图集与蒙版
++        // 纹理都走这条路（LOVE 0.10 用 GL_LUMINANCE8_ALPHA8，不认就直接抛异常）。
++        else if (internalformat == GL_LUMINANCE_ALPHA || format == GL_LUMINANCE_ALPHA) {
++            textureObject->SetSwizzleParamRGBA({TextureSwizzleParam::Red, TextureSwizzleParam::Red,
++                                                TextureSwizzleParam::Red, TextureSwizzleParam::Green});
++        } else if (internalformat == GL_LUMINANCE || format == GL_LUMINANCE) {
++            textureObject->SetSwizzleParamRGBA({TextureSwizzleParam::Red, TextureSwizzleParam::Red,
++                                                TextureSwizzleParam::Red, TextureSwizzleParam::One});
++        }
+ 
+         SizeT imageSize = 0;
+         const SizeT inputBpp = MG_Util::GetInputBytesPerPixel(textureInputFormat, texturePixelDataType);
+@@ -2443,6 +2463,16 @@ namespace MobileGL::MG_Impl::GLImpl {
+             textureObject->SetSwizzleParamRGBA({TextureSwizzleParam::Zero, TextureSwizzleParam::Zero,
+                                                 TextureSwizzleParam::Zero, TextureSwizzleParam::Red});
+         }
++        // 兼容档亮度格式：存储被降级成 R8 / RG8（见 ConvertGLEnumToTextureInternalFormat），
++        // 采样时用通道重排把单通道亮度铺成灰色、双通道铺成 (L,L,L,A)。老程序的字体图集与蒙版
++        // 纹理都走这条路（LOVE 0.10 用 GL_LUMINANCE8_ALPHA8，不认就直接抛异常）。
++        else if (internalFormat == GL_LUMINANCE_ALPHA || format == GL_LUMINANCE_ALPHA) {
++            textureObject->SetSwizzleParamRGBA({TextureSwizzleParam::Red, TextureSwizzleParam::Red,
++                                                TextureSwizzleParam::Red, TextureSwizzleParam::Green});
++        } else if (internalFormat == GL_LUMINANCE || format == GL_LUMINANCE) {
++            textureObject->SetSwizzleParamRGBA({TextureSwizzleParam::Red, TextureSwizzleParam::Red,
++                                                TextureSwizzleParam::Red, TextureSwizzleParam::One});
++        }
+ 
+         const SizeT internalBpp = MG_Util::GetInternalBytesPerPixel(textureInternalFormat, texturePixelDataType);
+         const SizeT internalBytes = static_cast<SizeT>(width) * internalBpp;
+diff --git a/MobileGL/MG_Impl/GLXImpl/Exporting/Definitions.cpp b/MobileGL/MG_Impl/GLXImpl/Exporting/Definitions.cpp
+index f3ccc74..5fd7ab2 100644
+--- a/MobileGL/MG_Impl/GLXImpl/Exporting/Definitions.cpp
++++ b/MobileGL/MG_Impl/GLXImpl/Exporting/Definitions.cpp
+@@ -223,13 +223,15 @@ MOBILEGL_GLX_API unsigned long glXCreatePixmap(Display*, void*, unsigned long, c
+ 
+ MOBILEGL_GLX_API void glXDestroyPixmap(Display*, unsigned long) {}
+ 
+-MOBILEGL_GLX_API unsigned long glXCreatePbuffer(Display*, void*, const int*) {
++MOBILEGL_GLX_API unsigned long glXCreatePbuffer(Display* dpy, void* config, const int* attribList) {
+     GLXStreamLock streamLock;
+-    MGLOG_W_ONCE("glx: glXCreatePbuffer is not supported");
+-    return 0;
++    return GLXImpl::CreatePbuffer(dpy, config, attribList);
+ }
+ 
+-MOBILEGL_GLX_API void glXDestroyPbuffer(Display*, unsigned long) {}
++MOBILEGL_GLX_API void glXDestroyPbuffer(Display* dpy, unsigned long pbuffer) {
++    GLXStreamLock streamLock;
++    GLXImpl::DestroyPbuffer(dpy, pbuffer);
++}
+ 
+ MOBILEGL_GLX_API void glXUseXFont(unsigned long, int, int, int) {
+     GLXStreamLock streamLock;
+diff --git a/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp b/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
+index 6684389..44f4f54 100644
+--- a/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
++++ b/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
+@@ -14,6 +14,7 @@
+ #include "../GetProcAddress.h"
+ #include "X11Present.h"
+ #include "X11PresentXcb.h"
++#include "X11WindowPresent.h"
+ #include <Init.h>
+ #include <Config.h>
+ #include <MG_Backend/BackendObjects.h>
+@@ -69,6 +70,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         constexpr int GLX_WIDTH = 0x801D;
+         constexpr int GLX_HEIGHT = 0x801E;
+         constexpr int GLX_WINDOW_BIT = 0x00000001;
++        constexpr int GLX_PBUFFER_BIT = 0x00000002;
++        constexpr int GLX_PIXMAP_BIT = 0x00000004;
++        constexpr int GLX_PBUFFER_HEIGHT = 0x8040;
++        constexpr int GLX_PBUFFER_WIDTH = 0x8041;
+         constexpr int GLX_RGBA_BIT = 0x00000001;
+         constexpr int GLX_SAMPLE_BUFFERS = 100000;
+         constexpr int GLX_SAMPLES = 100001;
+@@ -186,6 +191,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+                                       const Uint8*) = nullptr;
+             Uint32 (*MaximumRequestLength)(void*) = nullptr;
+             int (*Flush)(void*) = nullptr;
++            void* (*RequestCheck)(void*, XcbVoidCookie) = nullptr;
+ 
+             Bool Valid() const {
+                 return GetXCBConnection && GenerateId && CreateGC && FreeGC && PutImage && MaximumRequestLength &&
+@@ -208,6 +214,8 @@ namespace MobileGL::MG_Impl::GLXImpl {
+                     fns->MaximumRequestLength = reinterpret_cast<decltype(fns->MaximumRequestLength)>(
+                         dlsym(xcb, "xcb_get_maximum_request_length"));
+                     fns->Flush = reinterpret_cast<decltype(fns->Flush)>(dlsym(xcb, "xcb_flush"));
++                    fns->RequestCheck = reinterpret_cast<decltype(fns->RequestCheck)>(
++                        dlsym(xcb, "xcb_request_check"));
+                 }
+                 if (!fns->Valid()) {
+                     MGLOG_E_ONCE("glx: libX11-xcb/libxcb entry points missing; remote windows are not shown");
+@@ -219,21 +227,85 @@ namespace MobileGL::MG_Impl::GLXImpl {
+ 
+         constexpr Uint8 kXcbImageFormatZPixmap = 2;
+ 
+-        // ---- FBConfigs: mirror the two EGLState configs, stencil-8 first so
+-        //      stencil-wanting choosers (GLFW's default hints) match config 1 ----
++        // ---- FBConfigs: one per TrueColor visual the server offers ----
++        // A client that names the visual it draws on has to be handed a config for that visual:
++        // Chromium sends EGL_X11_VISUAL_ID_ANGLE and ANGLE then scans every config comparing
++        // GLX_VISUAL_ID, so a fixed pair of configs (what this used to be) only matched the
++        // default visual and made windowed Chromium fail with "Invalid visual ID requested".
++        // Everything is rendered offscreen and presented through the window's frames, so any
++        // visual works: the table is built from the display's visuals on first use, one entry per
++        // (visual, stencil) pair, and never grows again - pointers into it stay valid forever.
+         struct FBConfigInfo {
+             int FBConfigId;
+             GLint StencilBits;
++            int VisualId;
++            int Depth;
+         };
+-        constexpr FBConfigInfo kFBConfigs[] = {
+-            {1, 8},
+-            {2, 0},
+-        };
+-        constexpr int kFBConfigCount = static_cast<int>(std::size(kFBConfigs));
+ 
+-        const FBConfigInfo* TryGetFBConfig(GLXFBConfigHandle config) {
+-            const auto* info = static_cast<const FBConfigInfo*>(config);
+-            return (info >= kFBConfigs && info < kFBConfigs + kFBConfigCount) ? info : nullptr;
++        UnorderedMap<Uint64, Vector<FBConfigInfo>>& FBConfigTables() {
++            static auto* tables = new UnorderedMap<Uint64, Vector<FBConfigInfo>>();
++            return *tables;
++        }
++
++        Bool TryGetFBConfig(GLXFBConfigHandle config, FBConfigInfo* out) {
++            if (config == nullptr) {
++                return false;
++            }
++            auto& tables = FBConfigTables();
++            for (auto& entry : tables) {
++                auto& table = entry.second;
++                const auto* info = static_cast<const FBConfigInfo*>(config);
++                if (!table.empty() && info >= table.data() && info < table.data() + table.size()) {
++                    if (out != nullptr) {
++                        *out = *info;
++                    }
++                    return true;
++                }
++            }
++            return false;
++        }
++
++        const Vector<FBConfigInfo>& FBConfigsFor(Display* dpy) {
++            auto& table = FBConfigTables()[static_cast<Uint64>(reinterpret_cast<uintptr_t>(dpy))];
++            if (!table.empty()) {
++                return table;
++            }
++            const auto& x11 = X11();
++            if (x11.Valid() && dpy != nullptr) {
++                XVisualInfoCompat tmpl{};
++                tmpl.screen = x11.GetDefaultScreen(dpy);
++                tmpl.c_class = kTrueColor;
++                int count = 0;
++                XVisualInfoCompat* info =
++                    x11.GetVisualInfo(dpy, kVisualScreenMask | kVisualClassMask, &tmpl, &count);
++                if (info != nullptr) {
++                    int nextId = 1;
++                    for (int i = 0; i < count; ++i) {
++                        const int depth = info[i].depth;
++                        if (depth != 24 && depth != 32) {
++                            continue;
++                        }
++                        for (int stencil : {8, 0}) {
++                            FBConfigInfo config{};
++                            config.FBConfigId = nextId++;
++                            config.StencilBits = stencil;
++                            config.VisualId = static_cast<int>(info[i].visualid);
++                            config.Depth = depth;
++                            table.push_back(config);
++                        }
++                    }
++                    x11.Free(info);
++                }
++            }
++            if (table.empty()) {
++                FBConfigInfo fallback{};
++                fallback.FBConfigId = 1;
++                fallback.StencilBits = 8;
++                fallback.VisualId = 0;
++                fallback.Depth = 24;
++                table.push_back(fallback);
++            }
++            return table;
+         }
+ 
+         struct ContextObject {
+@@ -372,8 +444,47 @@ namespace MobileGL::MG_Impl::GLXImpl {
+             return it == contexts.end() ? nullptr : &it->second;
+         }
+ 
++        // ---- GLX pbuffers ----
++        // A pbuffer is an offscreen drawable with no X window behind it. ANGLE keeps a 1x1 pbuffer
++        // current while it queries the driver (its display init fails without one) and routes its
++        // EGL pbuffer surfaces here too, so a pbuffer is a first-class drawable: an id in this
++        // table, sized where it was created, drawn through the same EGL pbuffer surface a window
++        // uses. The ids sit outside the range an X server hands out, so they never collide with a
++        // real window or pixmap.
++        struct PbufferInfo {
++            Uint32 Width = 1;
++            Uint32 Height = 1;
++        };
++
++        UnorderedMap<GLXDrawableHandle, PbufferInfo>& Pbuffers() {
++            static auto* pbuffers = new UnorderedMap<GLXDrawableHandle, PbufferInfo>();
++            return *pbuffers;
++        }
++
++        const PbufferInfo* TryGetPbuffer(GLXDrawableHandle drawable) {
++            if (drawable == 0) {
++                return nullptr;
++            }
++            auto& pbuffers = Pbuffers();
++            const auto it = pbuffers.find(drawable);
++            return it == pbuffers.end() ? nullptr : &it->second;
++        }
++
++        Uint64& PbufferIdCounter() {
++            static Uint64 counter = 0x4D470000;
++            return counter;
++        }
++
+         Bool QueryDrawableSize(Display* dpy, GLXDrawableHandle drawable, Uint32& width, Uint32& height,
+                                Uint32* depthOut = nullptr) {
++            if (const PbufferInfo* pbuffer = TryGetPbuffer(drawable)) {
++                width = pbuffer->Width;
++                height = pbuffer->Height;
++                if (depthOut) {
++                    *depthOut = 24;
++                }
++                return true;
++            }
+             const auto& x11 = X11();
+             if (!x11.Valid() || !dpy || drawable == 0) {
+                 return false;
+@@ -502,10 +613,25 @@ namespace MobileGL::MG_Impl::GLXImpl {
+             const EGLint bandRows = std::max<EGLint>(1, static_cast<EGLint>(budget / rowBytes));
+             for (EGLint y = 0; y < height; y += bandRows) {
+                 const EGLint rows = std::min(bandRows, height - y);
+-                (void)xcb.PutImage(connection, kXcbImageFormatZPixmap, static_cast<Uint32>(drawable), surface.Gc,
+-                                   static_cast<Uint16>(width), static_cast<Uint16>(rows), 0, static_cast<Int16>(y), 0,
+-                                   static_cast<Uint8>(surface.Depth), static_cast<Uint32>(rowBytes * rows),
+-                                   surface.Image.data() + rowBytes * static_cast<SizeT>(y));
++                const XcbVoidCookie putCookie =
++                    xcb.PutImage(connection, kXcbImageFormatZPixmap, static_cast<Uint32>(drawable), surface.Gc,
++                                 static_cast<Uint16>(width), static_cast<Uint16>(rows), 0, static_cast<Int16>(y), 0,
++                                 static_cast<Uint8>(surface.Depth), static_cast<Uint32>(rowBytes * rows),
++                                 surface.Image.data() + rowBytes * static_cast<SizeT>(y));
++                if (xcb.RequestCheck != nullptr) {
++                    void* error = xcb.RequestCheck(connection, putCookie);
++                    if (error != nullptr) {
++                        const auto* bytes = static_cast<const Uint8*>(error);
++                        MGLOG_E("glx: PutImage band %d (+%d rows) of window 0x%lx failed: error_code=%u major=%u "
++                                "minor=%u (depth=%u gc=%u maxreq=%u bandRows=%d)",
++                                y, rows, static_cast<unsigned long>(drawable), bytes[1],
++                                static_cast<unsigned>(bytes[8]) | (static_cast<unsigned>(bytes[9]) << 8),
++                                static_cast<unsigned>(bytes[10]) | (static_cast<unsigned>(bytes[11]) << 8),
++                                static_cast<unsigned>(surface.Depth), surface.Gc, xcb.MaximumRequestLength(connection),
++                                bandRows);
++                        std::free(error);
++                    }
++                }
+             }
+             (void)xcb.Flush(connection);
+         }
+@@ -527,6 +653,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         // (same contract as the WGL and CGL layers). Polling XGetGeometry is a
+         // server round trip, so throttle steady-state swaps.
+         void SyncSurfaceSize(Display* dpy, GLXDrawableHandle drawable, DrawableSurface& surface, Bool force = false) {
++            if (TryGetPbuffer(drawable) != nullptr) {
++                // A pbuffer's size is the one it was created with; there is no window to poll.
++                return;
++            }
+             const auto now = std::chrono::steady_clock::now();
+             if (!force && now - surface.LastSizePoll < std::chrono::milliseconds(250)) {
+                 return;
+@@ -702,7 +832,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+                 *value = GLX_RGBA_BIT;
+                 return 0;
+             case GLX_DRAWABLE_TYPE:
+-                *value = GLX_WINDOW_BIT;
++                // Windows are what a desktop GLX client draws on; pbuffers are what ANGLE's
++                // offscreen surfaces ask for. Advertising both keeps a single config usable for
++                // either, which is what the chooser below relies on.
++                *value = GLX_WINDOW_BIT | GLX_PBUFFER_BIT;
+                 return 0;
+             case GLX_X_RENDERABLE:
+                 *value = 1;
+@@ -722,7 +855,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+                 *value = 0;
+                 return 0;
+             case GLX_VISUAL_ID: {
+-                *value = 0;
++                *value = info.VisualId;
++                if (*value != 0) {
++                    return 0;
++                }
+                 if (x11.Valid() && dpy) {
+                     const int screen = x11.GetDefaultScreen(dpy);
+                     void* visual = x11.GetDefaultVisual(dpy, screen);
+@@ -831,27 +967,31 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         return GetClientString(dpy, name);
+     }
+ 
+-    GLXFBConfigHandle* GetFBConfigs(Display*, int, int* nelements) {
+-        auto** configs = static_cast<GLXFBConfigHandle*>(std::malloc(sizeof(GLXFBConfigHandle) * kFBConfigCount));
++    GLXFBConfigHandle* GetFBConfigs(Display* dpy, int, int* nelements) {
++        const auto& table = FBConfigsFor(dpy);
++        const int total = static_cast<int>(table.size());
++        auto** configs = static_cast<GLXFBConfigHandle*>(std::malloc(sizeof(GLXFBConfigHandle) * total));
+         if (!configs) {
+             if (nelements) {
+                 *nelements = 0;
+             }
+             return nullptr;
+         }
+-        for (int i = 0; i < kFBConfigCount; ++i) {
+-            configs[i] = const_cast<FBConfigInfo*>(&kFBConfigs[i]);
++        for (int i = 0; i < total; ++i) {
++            configs[i] = const_cast<FBConfigInfo*>(&table[static_cast<SizeT>(i)]);
+         }
+         if (nelements) {
+-            *nelements = kFBConfigCount;
++            *nelements = total;
+         }
+         return configs;
+     }
+ 
+     GLXFBConfigHandle* ChooseFBConfig(Display* dpy, int screen, const int* attribList, int* nelements) {
+-        // Every config satisfies >= size matches for our fixed RGBA8888/24 caps;
+-        // the only distinguishing filters are stencil size and hard mismatches.
+-        Bool acceptConfig[kFBConfigCount] = {true, true};
++        // Every config satisfies >= size matches for our RGBA8888/24 caps; the filters below only
++        // reject hard mismatches (stencil size, config id, sizes we do not have).
++        const auto& table = FBConfigsFor(dpy);
++        const int total = static_cast<int>(table.size());
++        Vector<Bool> acceptConfig(static_cast<SizeT>(total), true);
+         if (attribList) {
+             for (SizeT i = 0; attribList[i] != 0; i += 2) {
+                 const int attrib = attribList[i];
+@@ -861,16 +1001,16 @@ namespace MobileGL::MG_Impl::GLXImpl {
+                 }
+                 switch (attrib) {
+                 case GLX_STENCIL_SIZE:
+-                    for (int c = 0; c < kFBConfigCount; ++c) {
+-                        if (kFBConfigs[c].StencilBits < value) {
+-                            acceptConfig[c] = false;
++                    for (int c = 0; c < total; ++c) {
++                        if (table[static_cast<SizeT>(c)].StencilBits < value) {
++                            acceptConfig[static_cast<SizeT>(c)] = false;
+                         }
+                     }
+                     break;
+                 case GLX_FBCONFIG_ID:
+-                    for (int c = 0; c < kFBConfigCount; ++c) {
+-                        if (kFBConfigs[c].FBConfigId != value) {
+-                            acceptConfig[c] = false;
++                    for (int c = 0; c < total; ++c) {
++                        if (table[static_cast<SizeT>(c)].FBConfigId != value) {
++                            acceptConfig[static_cast<SizeT>(c)] = false;
+                         }
+                     }
+                     break;
+@@ -879,22 +1019,30 @@ namespace MobileGL::MG_Impl::GLXImpl {
+                 case GLX_BLUE_SIZE:
+                 case GLX_ALPHA_SIZE:
+                     if (value > 8) {
+-                        acceptConfig[0] = acceptConfig[1] = false;
++                        for (int c = 0; c < total; ++c) {
++                            acceptConfig[static_cast<SizeT>(c)] = false;
++                        }
+                     }
+                     break;
+                 case GLX_BUFFER_SIZE:
+                     if (value > 32) {
+-                        acceptConfig[0] = acceptConfig[1] = false;
++                        for (int c = 0; c < total; ++c) {
++                            acceptConfig[static_cast<SizeT>(c)] = false;
++                        }
+                     }
+                     break;
+                 case GLX_DEPTH_SIZE:
+                     if (value > 24) {
+-                        acceptConfig[0] = acceptConfig[1] = false;
++                        for (int c = 0; c < total; ++c) {
++                            acceptConfig[static_cast<SizeT>(c)] = false;
++                        }
+                     }
+                     break;
+                 case GLX_DOUBLEBUFFER:
+                     if (value != 1) {
+-                        acceptConfig[0] = acceptConfig[1] = false;
++                        for (int c = 0; c < total; ++c) {
++                            acceptConfig[static_cast<SizeT>(c)] = false;
++                        }
+                     }
+                     break;
+                 case GLX_STEREO:
+@@ -907,17 +1055,28 @@ namespace MobileGL::MG_Impl::GLXImpl {
+                 case GLX_ACCUM_BLUE_SIZE:
+                 case GLX_ACCUM_ALPHA_SIZE:
+                     if (value > 0) {
+-                        acceptConfig[0] = acceptConfig[1] = false;
++                        for (int c = 0; c < total; ++c) {
++                            acceptConfig[static_cast<SizeT>(c)] = false;
++                        }
+                     }
+                     break;
+                 case GLX_RENDER_TYPE:
+                     if ((value & GLX_RGBA_BIT) == 0) {
+-                        acceptConfig[0] = acceptConfig[1] = false;
++                        for (int c = 0; c < total; ++c) {
++                            acceptConfig[static_cast<SizeT>(c)] = false;
++                        }
+                     }
+                     break;
+                 case GLX_DRAWABLE_TYPE:
+-                    if ((value & ~GLX_WINDOW_BIT) != 0) {
+-                        acceptConfig[0] = acceptConfig[1] = false;
++                    // A chooser that wants a window may also name pbuffer/pixmap bits: ANGLE asks
++                    // for all three because one GL context has to be compatible with every EGL
++                    // config it exposes. Rejecting the extra bits made its display init fail with
++                    // "Could not find a decent GLX FBConfig to create the context". The config is
++                    // usable for a window, so only a request without the window bit is a mismatch.
++                    if ((value & GLX_WINDOW_BIT) == 0) {
++                        for (int c = 0; c < total; ++c) {
++                            acceptConfig[static_cast<SizeT>(c)] = false;
++                        }
+                     }
+                     break;
+                 default:
+@@ -929,8 +1088,8 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         }
+ 
+         int count = 0;
+-        for (int c = 0; c < kFBConfigCount; ++c) {
+-            if (acceptConfig[c]) {
++        for (int c = 0; c < total; ++c) {
++            if (acceptConfig[static_cast<SizeT>(c)]) {
+                 ++count;
+             }
+         }
+@@ -948,9 +1107,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
+             return nullptr;
+         }
+         int out = 0;
+-        for (int c = 0; c < kFBConfigCount; ++c) {
+-            if (acceptConfig[c]) {
+-                configs[out++] = const_cast<FBConfigInfo*>(&kFBConfigs[c]);
++        for (int c = 0; c < total; ++c) {
++            if (acceptConfig[static_cast<SizeT>(c)]) {
++                configs[out++] = const_cast<FBConfigInfo*>(&table[static_cast<SizeT>(c)]);
+             }
+         }
+         if (nelements) {
+@@ -962,17 +1121,33 @@ namespace MobileGL::MG_Impl::GLXImpl {
+     }
+ 
+     int GetFBConfigAttrib(Display* dpy, GLXFBConfigHandle config, int attribute, int* value) {
+-        const auto* info = TryGetFBConfig(config);
+-        if (!info || !value) {
++        FBConfigInfo info{};
++        if (!TryGetFBConfig(config, &info) || !value) {
+             return GLX_BAD_ATTRIBUTE;
+         }
+-        return FBConfigAttribValue(dpy, *info, attribute, value);
++        return FBConfigAttribValue(dpy, info, attribute, value);
+     }
+ 
+     void* GetVisualFromFBConfig(Display* dpy, GLXFBConfigHandle config) {
+-        if (!TryGetFBConfig(config)) {
++        FBConfigInfo info{};
++        if (!TryGetFBConfig(config, &info)) {
+             return nullptr;
+         }
++        if (info.VisualId != 0) {
++            const auto& x11 = X11();
++            if (x11.Valid() && dpy != nullptr) {
++                XVisualInfoCompat tmpl{};
++                tmpl.visualid = static_cast<VisualID>(info.VisualId);
++                int count = 0;
++                XVisualInfoCompat* visual = x11.GetVisualInfo(dpy, kVisualIDMask, &tmpl, &count);
++                if (visual != nullptr && count >= 1) {
++                    return visual;
++                }
++                if (visual != nullptr) {
++                    x11.Free(visual);
++                }
++            }
++        }
+         return ResolveVisual(dpy, -1);
+     }
+ 
+@@ -1057,14 +1232,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
+             EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
+             EGL_NONE,
+         };
+-        return CreateContextFromEGLAttribs(dpy, &kFBConfigs[0], share, attribs);
++        return CreateContextFromEGLAttribs(dpy, &FBConfigsFor(dpy)[0], share, attribs);
+     }
+ 
+     GLXContextHandle CreateNewContext(Display* dpy, GLXFBConfigHandle config, int renderType, GLXContextHandle share,
+                                       int) {
+         EnsureInitialized();
+-        const auto* info = TryGetFBConfig(config);
+-        if (!info || renderType != GLX_RGBA_TYPE) {
++        FBConfigInfo info{};
++        if (!TryGetFBConfig(config, &info) || renderType != GLX_RGBA_TYPE) {
+             return nullptr;
+         }
+         const EGLint attribs[] = {
+@@ -1076,14 +1251,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
+             EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
+             EGL_NONE,
+         };
+-        return CreateContextFromEGLAttribs(dpy, info, share, attribs);
++        return CreateContextFromEGLAttribs(dpy, &info, share, attribs);
+     }
+ 
+     GLXContextHandle CreateContextAttribsARB(Display* dpy, GLXFBConfigHandle config, GLXContextHandle share, int,
+                                              const int* attribList) {
+         EnsureInitialized();
+-        const auto* info = TryGetFBConfig(config);
+-        if (!info) {
++        FBConfigInfo info{};
++        if (!TryGetFBConfig(config, &info)) {
+             return nullptr;
+         }
+ 
+@@ -1145,7 +1320,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         }
+         attribs.push_back(EGL_NONE);
+ 
+-        return CreateContextFromEGLAttribs(dpy, info, share, attribs.data());
++        return CreateContextFromEGLAttribs(dpy, &info, share, attribs.data());
+     }
+ 
+     void DestroyContext(Display*, GLXContextHandle context) {
+@@ -1225,7 +1400,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         }
+         // What the window shows is the frame the swap finishes, read back while it is still the
+         // drawable's content (only from the thread it is current to: the readback is a GL call).
+-        if (it->second.RemotePbuffer && t_current.Draw == drawable && t_current.Context) {
++        // A pbuffer has no window to show anything: its content stays in its own surface.
++        const Bool pbuffer = TryGetPbuffer(drawable) != nullptr;
++        if (!pbuffer && it->second.RemotePbuffer && t_current.Draw == drawable && t_current.Context) {
+             PresentRemoteDrawable(drawable, it->second);
+         }
+         EGLImpl::SwapBuffers(it->second.Display, it->second.Surface);
+@@ -1240,14 +1417,66 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         SyncSurfaceSize(dpy, drawable, it->second, configured);
+     }
+ 
++    GLXDrawableHandle CreatePbuffer(Display* dpy, GLXFBConfigHandle config, const int* attribList) {
++        EnsureInitialized();
++        const std::lock_guard<std::recursive_mutex> lock(RegistryMutex());
++        FBConfigInfo pbufferConfig{};
++        if (!TryGetFBConfig(config, &pbufferConfig)) {
++            MGLOG_E_ONCE("glx: glXCreatePbuffer with an unknown FBConfig");
++            return 0;
++        }
++        Uint32 width = 1;
++        Uint32 height = 1;
++        if (attribList != nullptr) {
++            for (SizeT i = 0; attribList[i] != 0; i += 2) {
++                const int value = attribList[i + 1];
++                if (value <= 0) {
++                    continue;
++                }
++                if (attribList[i] == GLX_PBUFFER_WIDTH) {
++                    width = static_cast<Uint32>(value);
++                } else if (attribList[i] == GLX_PBUFFER_HEIGHT) {
++                    height = static_cast<Uint32>(value);
++                }
++            }
++        }
++        const GLXDrawableHandle drawable = static_cast<GLXDrawableHandle>(++PbufferIdCounter());
++        Pbuffers()[drawable] = PbufferInfo{std::max(width, 1u), std::max(height, 1u)};
++        MGLOG_D("glx: glXCreatePbuffer -> 0x%lx (%ux%u)", drawable, width, height);
++        (void)dpy;
++        return drawable;
++    }
++
++    void DestroyPbuffer(Display* dpy, GLXDrawableHandle drawable) {
++        const std::lock_guard<std::recursive_mutex> lock(RegistryMutex());
++        auto& pbuffers = Pbuffers();
++        const auto it = pbuffers.find(drawable);
++        if (it == pbuffers.end()) {
++            return;
++        }
++        pbuffers.erase(it);
++        auto& surfaces = DrawableSurfaces();
++        const auto surface = surfaces.find(drawable);
++        if (surface != surfaces.end()) {
++            if (t_current.Draw == drawable) {
++                (void)EGLImpl::MakeCurrent(EGL_NO_DISPLAY, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++                t_current = {};
++            }
++            ReleaseDrawableSurface(surface->second);
++            surfaces.erase(surface);
++        }
++        MGLOG_D("glx: glXDestroyPbuffer(0x%lx)", drawable);
++        (void)dpy;
++    }
++
+     GLXDrawableHandle CreateWindow(Display*, GLXFBConfigHandle config, GLXDrawableHandle window, const int*) {
+         EnsureInitialized();
+-        const auto* info = TryGetFBConfig(config);
+-        if (!info || window == 0) {
++        FBConfigInfo info{};
++        if (!TryGetFBConfig(config, &info) || window == 0) {
+             return 0;
+         }
+         const std::lock_guard<std::recursive_mutex> lock(RegistryMutex());
+-        WindowFBConfigs()[window] = info;
++        WindowFBConfigs()[window] = nullptr;  // the window's config is only needed for GLX_FBCONFIG_ID
+         // The GLXWindow is the X window itself; the EGL surface is created
+         // lazily on the first MakeCurrent (same pattern as WGL's HWND cache).
+         return window;
+@@ -1396,6 +1625,157 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         SwapIntervalEXT(nullptr, 0, interval);
+         return 0;
+     }
++
++    // ---- EGL window surfaces on an X server -------------------------------------------------------
++    // An X11 window is the same thing to present into whether its frames came from a GLX context or
++    // an EGL one, so an EGL window surface rides the chain below instead of growing a second copy
++    // of DRI3/MIT-SHM/PutImage. The frame is the one in the surface's own storage: Present() runs
++    // before the EGL swap, exactly where glXSwapBuffers runs it for a GLX window.
++
++    namespace X11WindowPresent {
++        namespace {
++            // libX11/libxcb looked up at runtime: this library links neither, and a build without
++            // them must still load.
++            struct XlibGeometryApi {
++                void* (*OpenDisplay)(const char*) = nullptr;
++                int (*GetGeometry)(void*, Uint64, Uint64*, int*, int*, unsigned int*, unsigned int*,
++                                   unsigned int*, unsigned int*) = nullptr;
++                Bool Resolved = false;
++            };
++
++            XlibGeometryApi& GeometryApi() {
++                static XlibGeometryApi api = [] {
++                    XlibGeometryApi resolved;
++                    resolved.Resolved = true;
++                    if (void* handle = dlopen("libX11.so.6", RTLD_LAZY | RTLD_LOCAL)) {
++                        resolved.OpenDisplay = reinterpret_cast<void* (*)(const char*)>(dlsym(handle, "XOpenDisplay"));
++                        resolved.GetGeometry = reinterpret_cast<decltype(resolved.GetGeometry)>(
++                            dlsym(handle, "XGetGeometry"));
++                    }
++                    return resolved;
++                }();
++                return api;
++            }
++
++            UnorderedMap<Uint64, UniquePtr<DrawableSurface>>& EglWindowSurfaces() {
++                static UnorderedMap<Uint64, UniquePtr<DrawableSurface>> surfaces;
++                return surfaces;
++            }
++
++            // The X window each attached surface presents into (the surface key alone cannot say).
++            UnorderedMap<Uint64, Uint64>& EglWindowIds() {
++                static UnorderedMap<Uint64, Uint64> windows;
++                return windows;
++            }
++
++            Uint64 SurfaceKey(EGLSurface surface) {
++                return static_cast<Uint64>(reinterpret_cast<uintptr_t>(surface));
++            }
++        } // namespace
++
++        void* DefaultXDisplay() {
++            static void* display = [] {
++                auto& api = GeometryApi();
++                return api.OpenDisplay != nullptr ? api.OpenDisplay(nullptr) : nullptr;
++            }();
++            return display;
++        }
++
++        Bool QueryGeometry(void* xDisplay, Uint64 window, Uint32* width, Uint32* height, Uint32* depth) {
++            if (xDisplay == nullptr || window == 0) return false;
++            auto& api = GeometryApi();
++            if (api.GetGeometry == nullptr) return false;
++            Uint64 root = 0;
++            Int32 x = 0, y = 0;
++            unsigned int w = 0, h = 0, borderWidth = 0, windowDepth = 0;
++            const int geometry = api.GetGeometry(xDisplay, window, &root, &x, &y, &w, &h, &borderWidth,
++                                                 &windowDepth);
++            if (geometry == 0) {
++                return false;
++            }
++            if (w == 0 || h == 0) return false;
++            if (width != nullptr) *width = w;
++            if (height != nullptr) *height = h;
++            if (depth != nullptr) *depth = windowDepth;
++            return true;
++        }
++
++        Bool Attach(EGLDisplay dpy, EGLSurface surface, void* xDisplay, Uint64 window, Uint32 width, Uint32 height,
++                    Uint32 depth) {
++            if (surface == EGL_NO_SURFACE || xDisplay == nullptr || window == 0) return false;
++            const std::lock_guard<std::recursive_mutex> lock(RegistryMutex());
++            auto& surfaces = EglWindowSurfaces();
++            const Uint64 key = SurfaceKey(surface);
++            EglWindowIds()[key] = window;
++            auto it = surfaces.find(key);
++            if (it == surfaces.end()) {
++                auto entry = MakeUnique<DrawableSurface>();
++                entry->Display = dpy;
++                entry->Surface = surface;
++                entry->XDisplay = static_cast<::Display*>(xDisplay);
++                entry->Width = width;
++                entry->Height = height;
++                entry->Depth = depth;
++                entry->RemotePbuffer = true; // an offscreen surface that is shown on the window
++                surfaces[key] = std::move(entry);
++                it = surfaces.find(key);
++            } else {
++                it->second->Width = width;
++                it->second->Height = height;
++                it->second->Depth = depth;
++            }
++            MGLOG_I("egl: window 0x%llx (%ux%u, depth %u) presents through the DRI3/MIT-SHM path of the X server",
++                    static_cast<unsigned long long>(window), width, height, depth);
++            return true;
++        }
++
++        Bool Present(EGLDisplay dpy, EGLSurface surface) {
++            if (surface == EGL_NO_SURFACE) return false;
++            const std::lock_guard<std::recursive_mutex> lock(RegistryMutex());
++            auto& surfaces = EglWindowSurfaces();
++            const Uint64 key = SurfaceKey(surface);
++            auto it = surfaces.find(key);
++            if (it == surfaces.end()) return false;
++            DrawableSurface& entry = *it->second;
++            if (entry.Display == EGL_NO_DISPLAY) entry.Display = dpy;
++            // The window may have been resized since the surface was made. Follow it: the chain
++            // presents at the size the frame has, so both the surface and the chain learn the new
++            // geometry here rather than stretching the old frame.
++            auto& ids = EglWindowIds();
++            const auto idIt = ids.find(key);
++            if (const Uint64 window = idIt != ids.end() ? idIt->second : 0; window != 0) {
++                Uint32 windowWidth = 0, windowHeight = 0, windowDepth = 0;
++                if (QueryGeometry(entry.XDisplay, window, &windowWidth, &windowHeight, &windowDepth) &&
++                    (windowWidth != entry.Width || windowHeight != entry.Height)) {
++                    entry.Width = windowWidth;
++                    entry.Height = windowHeight;
++                    if (windowDepth == 24 || windowDepth == 32) entry.Depth = windowDepth;
++                    SyncSurfaceSize(entry.XDisplay, static_cast<GLXDrawableHandle>(key), entry, /*force=*/true);
++                }
++            }
++            // The drawable the chain presents into is the X WINDOW, never the surface handle: the
++            // readback path makes a GC on it and PresentPixmap names it.
++            const auto& windowIt = EglWindowIds().find(key);
++            if (windowIt == EglWindowIds().end() || windowIt->second == 0) return false;
++            const auto window = static_cast<GLXDrawableHandle>(windowIt->second);
++            if (!entry.PathChosen) {
++                const auto& xcb = Xcb();
++                if (!xcb.Valid() || entry.XDisplay == nullptr) return false;
++                void* connection = xcb.GetXCBConnection(entry.XDisplay);
++                if (connection == nullptr) return false;
++                ChoosePresentPath(window, entry, connection);
++            }
++            PresentRemoteDrawable(window, entry);
++            return true;
++        }
++
++        void Detach(EGLSurface surface) {
++            if (surface == EGL_NO_SURFACE) return;
++            const std::lock_guard<std::recursive_mutex> lock(RegistryMutex());
++            EglWindowSurfaces().erase(SurfaceKey(surface));
++            EglWindowIds().erase(SurfaceKey(surface));
++        }
++    } // namespace X11WindowPresent
+ } // namespace MobileGL::MG_Impl::GLXImpl
+ 
+ #endif // __linux__ && !__ANDROID__
+diff --git a/MobileGL/MG_Impl/GLXImpl/GLXImpl.h b/MobileGL/MG_Impl/GLXImpl/GLXImpl.h
+index 5675880..226048c 100644
+--- a/MobileGL/MG_Impl/GLXImpl/GLXImpl.h
++++ b/MobileGL/MG_Impl/GLXImpl/GLXImpl.h
+@@ -42,6 +42,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
+     int MakeContextCurrent(Display* dpy, GLXDrawableHandle draw, GLXDrawableHandle read, GLXContextHandle context);
+     void SwapBuffers(Display* dpy, GLXDrawableHandle drawable);
+ 
++    GLXDrawableHandle CreatePbuffer(Display* dpy, GLXFBConfigHandle config, const int* attribList);
++    void DestroyPbuffer(Display* dpy, GLXDrawableHandle pbuffer);
++
+     GLXDrawableHandle CreateWindow(Display* dpy, GLXFBConfigHandle config, GLXDrawableHandle window,
+                                    const int* attribList);
+     void DestroyWindow(Display* dpy, GLXDrawableHandle window);
+diff --git a/MobileGL/MG_Impl/GLXImpl/X11PresentXcb.cpp b/MobileGL/MG_Impl/GLXImpl/X11PresentXcb.cpp
+index 837d654..6e0c7c7 100644
+--- a/MobileGL/MG_Impl/GLXImpl/X11PresentXcb.cpp
++++ b/MobileGL/MG_Impl/GLXImpl/X11PresentXcb.cpp
+@@ -288,35 +288,63 @@ namespace MobileGL::MG_Impl::GLXImpl::X11Present {
+ 
+             Uint32 ImportPixmap(const Image& image, Uint32 depth) override {
+                 const XcbApi& api = Api();
+-                // libxcb closes the descriptor it sends.
+-                const int fd = ::fcntl(image.Fd, F_DUPFD_CLOEXEC, 0);
+-                if (fd < 0) return 0;
+-                const Uint32 pixmap = api.xcb_generate_id(m_c);
+-                xcb_void_cookie_t cookie{};
+-                if (m_buffers12 && api.xcb_dri3_pixmap_from_buffers_checked != nullptr) {
+-                    int32_t fds[1] = {fd};
+-                    cookie = api.xcb_dri3_pixmap_from_buffers_checked(
+-                        m_c, pixmap, m_window, 1, static_cast<uint16_t>(image.Width),
+-                        static_cast<uint16_t>(image.Height), image.Stride, image.Offset, 0, 0, 0, 0, 0, 0,
+-                        static_cast<uint8_t>(depth), 32, image.Modifier, fds);
+-                } else {
+-                    if (image.Offset != 0 || image.Stride > 0xffffu) {
+-                        ::close(fd);
+-                        return 0;
+-                    }
+-                    cookie = api.xcb_dri3_pixmap_from_buffer_checked(
++                if (!m_buffers12 || api.xcb_dri3_pixmap_from_buffers_checked == nullptr) {
++                    // DRI3 1.0 names no modifier: one descriptor, described by its stride alone.
++                    if (image.Offset != 0 || image.Stride > 0xffffu) return 0;
++                    const int fd = ::fcntl(image.Fd, F_DUPFD_CLOEXEC, 0);
++                    if (fd < 0) return 0;
++                    const Uint32 pixmap = api.xcb_generate_id(m_c);
++                    const xcb_void_cookie_t cookie = api.xcb_dri3_pixmap_from_buffer_checked(
+                         m_c, pixmap, m_window, image.Stride * image.Height, static_cast<uint16_t>(image.Width),
+                         static_cast<uint16_t>(image.Height), static_cast<uint16_t>(image.Stride),
+                         static_cast<uint8_t>(depth), 32, fd);
++                    if (xcb_generic_error_t* error = api.xcb_request_check(m_c, cookie)) {
++                        MGLOG_I(
++                            "glx: the X server refused a %ux%u shared image as a pixmap (X error %u, major %u "
++                            "minor %u)",
++                            image.Width, image.Height, error->error_code, error->major_code, error->minor_code);
++                        std::free(error);
++                        return 0;
++                    }
++                    return pixmap;
+                 }
+-                if (xcb_generic_error_t* error = api.xcb_request_check(m_c, cookie)) {
+-                    MGLOG_I(
+-                        "glx: the X server refused a %ux%u shared image as a pixmap (X error %u, major %u minor %u)",
+-                        image.Width, image.Height, error->error_code, error->major_code, error->minor_code);
+-                    std::free(error);
+-                    return 0;
++                // Some servers name no DRM modifier of their own and accept only their own synthetic
++                // ones: Xlorie takes the descriptor it may map itself (1274) or a socket that carries
++                // an AHardwareBuffer (1255), and refuses every other name. The first attempt names
++                // what the image reports, so a server that understands real modifiers - Xwayland -
++                // is unaffected; the second names the mmappable descriptor, which is the same buffer
++                // for a linear image and is what such a server is asking for.
++                constexpr Uint64 kRawMmappableFd = 1274;
++                constexpr Uint64 kAhbSocketFd = 1255;
++                const Bool serverNamed = image.Modifier == kRawMmappableFd || image.Modifier == kAhbSocketFd;
++                for (int attempt = 0; attempt < 2; ++attempt) {
++                    const Uint64 modifier =
++                        serverNamed ? image.Modifier : (attempt == 0 ? image.Modifier : kRawMmappableFd);
++                    const int fd = ::fcntl(image.Fd, F_DUPFD_CLOEXEC, 0);
++                    if (fd < 0) return 0;
++                    const Uint32 pixmap = api.xcb_generate_id(m_c);
++                    int32_t fds[1] = {fd};
++                    const xcb_void_cookie_t cookie = api.xcb_dri3_pixmap_from_buffers_checked(
++                        m_c, pixmap, m_window, 1, static_cast<uint16_t>(image.Width),
++                        static_cast<uint16_t>(image.Height), image.Stride, image.Offset, 0, 0, 0, 0, 0, 0,
++                        static_cast<uint8_t>(depth), 32, modifier, fds);
++                    if (xcb_generic_error_t* error = api.xcb_request_check(m_c, cookie)) {
++                        MGLOG_I(
++                            "glx: the X server refused a %ux%u shared image as a pixmap (modifier 0x%llx, X "
++                            "error %u, major %u minor %u)",
++                            image.Width, image.Height, static_cast<unsigned long long>(modifier),
++                            error->error_code, error->major_code, error->minor_code);
++                        std::free(error);
++                        continue;
++                    }
++                    if (attempt > 0)
++                        MGLOG_I(
++                            "glx: the %ux%u shared image is imported under the mmappable-descriptor name "
++                            "(the server named no modifier of its own)",
++                            image.Width, image.Height);
++                    return pixmap;
+                 }
+-                return pixmap;
++                return 0;
+             }
+ 
+             void FreePixmap(Uint32 pixmap) override {
+diff --git a/MobileGL/MG_Impl/GetProcAddress.cpp b/MobileGL/MG_Impl/GetProcAddress.cpp
+index 97a95af..f8c7f19 100644
+--- a/MobileGL/MG_Impl/GetProcAddress.cpp
++++ b/MobileGL/MG_Impl/GetProcAddress.cpp
+@@ -7,6 +7,9 @@
+ // End of Source File Header
+ 
+ #include "GetProcAddress.h"
++#if !defined(_WIN32)
++#include <dlfcn.h>
++#endif
+ #if defined(__APPLE__) && !defined(MOBILEGL_IOS)
+ #ifndef GL_SILENCE_DEPRECATION
+ #define GL_SILENCE_DEPRECATION
+@@ -1549,6 +1552,21 @@ namespace MobileGL::MG_Impl {
+         GETPROC(glFramebufferTextureMultiviewOVR, name);
+         // GETPROC(glNamedFramebufferTextureMultiviewOVR, name);
+ 
++        // 兜底：这个列表只覆盖了常用的那批名字（约 1400 个），而 MobileGL 实际导出的 GL 入口
++        // 有近 3000 个。GLAD / GLEW 这类加载器会把它们编译时用到的每个名字都问一遍，漏一个就
++        // 拿到 NULL，然后在程序里直接 call NULL 崩掉（LOVE 0.10 的 glMatrixMode 就是这样死的：
++        // 符号明明导出了，Step 只是没列进这张表）。
++        // 所以最后回落到动态符号表：名字以 gl 开头（glX*/egl* 由各自的层处理）就交给 dlsym。
++#if !defined(_WIN32)
++        if (name != nullptr && name[0] == 'g' && name[1] == 'l') {
++            void* fallback = dlsym(RTLD_DEFAULT, name);
++            if (fallback != nullptr) {
++                MGLOG_D("GetProcAddress(%s) = %p (via dlsym fallback)", name, fallback);
++                return fallback;
++            }
++        }
++#endif
++
+         MGLOG_D("GetProcAddress(%s) = nullptr!", name);
+         return nullptr;
+     }
+diff --git a/MobileGL/MG_Remote/Server/SharedImageRegistry.cpp b/MobileGL/MG_Remote/Server/SharedImageRegistry.cpp
+index 5ae42c2..1ed1692 100644
+--- a/MobileGL/MG_Remote/Server/SharedImageRegistry.cpp
++++ b/MobileGL/MG_Remote/Server/SharedImageRegistry.cpp
+@@ -148,9 +148,20 @@ namespace MobileGL::MG_Remote::Server::SharedImages {
+         constexpr uint64_t kYuvUsage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN |
+                                        AHARDWAREBUFFER_USAGE_CPU_READ_RARELY;
+ 
++        // AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, which every NDK header spells out and the one in
++        // front of this build does not. Five is its value, and its ABI is not going to move.
++        constexpr uint32_t kAhbFormatBgra8888 = 5;
++
+         uint32_t AhbFormatOf(Uint32 fourcc) {
+             if (fourcc == kFourccNv12) return AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420;
+             if (fourcc == kFourccP010) return AHARDWAREBUFFER_FORMAT_YCbCr_P010;
++            // A reader that is not this server and not a GPU: a descriptor handed to an X server,
++            // which mmaps it and reads the bytes as its own visual lays them out. The fourcc names
++            // ARE that layout - ARGB8888/XRGB8888 spell B, G, R, A in memory - so the allocation
++            // has to keep it. Declaring the format costs this server nothing: every consumer it
++            // has passes the format to the platform, which addresses channels logically anyway.
++            if (fourcc == kFourccArgb8888 || fourcc == kFourccXrgb8888)
++                return AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM;
+             return FourccIgnoresAlpha(fourcc) ? AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM
+                                               : AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+         }
+@@ -201,9 +212,14 @@ namespace MobileGL::MG_Remote::Server::SharedImages {
+             desc.height = image.Height;
+             desc.layers = 1;
+             desc.format = AhbFormatOf(image.Fourcc);
++            // CPU_READ_OFTEN is not for us: it is what makes the platform hand back a linearly
++            // laid out buffer. A consumer that mmaps this buffer's descriptor and reads it as a
++            // plain pixel array - an X server importing it as a DRI3 pixmap - sees compressed
++            // (AFBC/tiled) bytes otherwise, which is a frame of noise rather than a picture.
+             desc.usage = FourccIsYuv(image.Fourcc)
+                              ? kYuvUsage
+-                             : AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT;
++                             : AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
++                                   AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
+             AHardwareBuffer* ahb = nullptr;
+             const int allocated = AHardwareBuffer_allocate(&desc, &ahb);
+             if (allocated != 0 || ahb == nullptr) {
+@@ -217,10 +233,24 @@ namespace MobileGL::MG_Remote::Server::SharedImages {
+                 AHardwareBuffer_release(ahb);
+                 return false;
+             }
++            // A gralloc native handle carries several descriptors and only one of them is the buffer
++            // itself; the rest are bookkeeping (a zero-length file, the metadata socket). Handing
++            // out fds[0] blindly works for shm links, which pass the handle along untouched, but a
++            // consumer that mmaps the descriptor - an X server importing it as a DRI3 pixmap - gets
++            // ENODEV on anything but the buffer. Pick the descriptor that maps: the first that is
++            // not a socket and reports a size. Platform order stays as the fallback.
++            SizeT chosenFd = 0;
++            for (SizeT i = 0; i < fds.size(); ++i) {
++                struct stat info {};
++                if (::fstat(fds[i], &info) != 0) continue;
++                if (S_ISSOCK(info.st_mode) || info.st_size <= 0) continue;
++                chosenFd = i;
++                break;
++            }
+             image.Native = ahb;
+-            image.Fd = fds[0];
+-            for (SizeT i = 1; i < fds.size(); ++i)
+-                ::close(fds[i]);
++            image.Fd = fds[chosenFd];
++            for (SizeT i = 0; i < fds.size(); ++i)
++                if (i != chosenFd) ::close(fds[i]);
+             image.Offset = 0;
+             if (!FourccIsYuv(image.Fourcc)) {
+                 image.Stride = described.stride * 4;
+diff --git a/MobileGL/MG_Util/Converters/GLToMG/TextureEnumConverter.cpp b/MobileGL/MG_Util/Converters/GLToMG/TextureEnumConverter.cpp
+index d974396..a2581d6 100644
+--- a/MobileGL/MG_Util/Converters/GLToMG/TextureEnumConverter.cpp
++++ b/MobileGL/MG_Util/Converters/GLToMG/TextureEnumConverter.cpp
+@@ -65,8 +65,16 @@ namespace MobileGL {
+             // swizzle). Readback of GL_ALPHA is corrected at the backend, which maps the raw enum to
+             // source channel 3 (DirectGLES GetReadbackChannelMapping).
+             case GL_ALPHA:
++            // 兼容档亮度格式：GL_LUMINANCE 的纹素就是一个亮度字节，落进 R8 存储正好等价（配合
++            // 0,0,0,1 之类的通道重排即可还原成灰色）；GL_LUMINANCE_ALPHA 是两个字节（L,A），
++            // 与 RG8 的 (R,G) 布局一致。LOVE 0.10 的 TrueType 字体图集就是这么传的
++            // （internalformat GL_LUMINANCE8_ALPHA8 / format GL_LUMINANCE_ALPHA），
++            // 不接这条老格式路径，newFont 会直接抛 "Could not create font texture!"。
++            case GL_LUMINANCE:
+             case GL_RED:
+                 return TextureInputFormat::Red;
++            case GL_LUMINANCE_ALPHA:
++                return TextureInputFormat::RG;
+             case GL_GREEN:
+                 return TextureInputFormat::Green;
+             case GL_BLUE:
+@@ -112,8 +120,24 @@ namespace MobileGL {
+ 
+         TextureInternalFormat ConvertGLEnumToTextureInternalFormat(GLenum internalformat) {
+             switch (internalformat) {
++            case GL_LUMINANCE4:
++            case GL_LUMINANCE8:
++            case GL_LUMINANCE12:
++            case GL_LUMINANCE16:
++            case GL_SLUMINANCE:
++            case GL_SLUMINANCE8:
++            case GL_LUMINANCE:
+             case GL_R8:
+                 return TextureInternalFormat::R8;
++            case GL_LUMINANCE4_ALPHA4:
++            case GL_LUMINANCE6_ALPHA2:
++            case GL_LUMINANCE8_ALPHA8:
++            case GL_LUMINANCE12_ALPHA4:
++            case GL_LUMINANCE12_ALPHA12:
++            case GL_LUMINANCE16_ALPHA16:
++            case GL_SLUMINANCE8_ALPHA8:
++            case GL_LUMINANCE_ALPHA:
++                return TextureInternalFormat::RG8;
+             case GL_R8_SNORM:
+                 return TextureInternalFormat::R8Snorm;
+             case GL_R16:
+diff --git a/MobileGL/MG_Util/ShaderTranspiler/ShaderSourceProcessor.cpp b/MobileGL/MG_Util/ShaderTranspiler/ShaderSourceProcessor.cpp
+index 5d0f945..2efdff0 100644
+--- a/MobileGL/MG_Util/ShaderTranspiler/ShaderSourceProcessor.cpp
++++ b/MobileGL/MG_Util/ShaderTranspiler/ShaderSourceProcessor.cpp
+@@ -1630,6 +1630,33 @@ namespace {
+     // tracker rather than a bare offset because this pass rewrites identifiers first, and those
+     // rewrites are raw text: a leading comment banner mentioning `varying` or `texture2D` moves the
+     // anchor, and the tracker notices.
++    // 兼容档的内建矩阵（gl_ModelViewProjectionMatrix 这一族）在 Vulkan 的 glslang 下不存在：
++    // 它们只在桌面兼容档成立。老引擎的 shader 却直接这么写（LOVE 0.10 就是把
++    // TransformProjectionMatrix #define 到 gl_ModelViewProjectionMatrix 上），于是
++    // '#version 120' 被规范化成 330 core 之后就撞上 undeclared identifier。
++    // 这里把四个名字改写成 mg_* 前缀的 uniform，并在 #version 之后补上声明；值由
++    // MG_Impl 里的兼容档矩阵栈在每次 draw 之前上传（CompatUploadImplicitUniforms）。
++    void InjectCompatMatrixBuiltins(MobileGL::String& source, AfterVersionAnchor& afterVersion) {
++        const bool usesMvp = source.find("gl_ModelViewProjectionMatrix") != MobileGL::String::npos;
++        const bool usesMv = source.find("gl_ModelViewMatrix") != MobileGL::String::npos;
++        const bool usesProjection = source.find("gl_ProjectionMatrix") != MobileGL::String::npos;
++        const bool usesNormal = source.find("gl_NormalMatrix") != MobileGL::String::npos;
++        if (!usesMvp && !usesMv && !usesProjection && !usesNormal) return;
++        if (source.find("mg_CompatMatrixInjected") != MobileGL::String::npos) return;
++
++        ReplaceIdentifier(source, "gl_ModelViewProjectionMatrix", "mg_ModelViewProjectionMatrix");
++        ReplaceIdentifier(source, "gl_ModelViewMatrix", "mg_ModelViewMatrix");
++        ReplaceIdentifier(source, "gl_ProjectionMatrix", "mg_ProjectionMatrix");
++        ReplaceIdentifier(source, "gl_NormalMatrix", "mg_NormalMatrix");
++
++        MobileGL::String declarations = "// mg_CompatMatrixInjected\n";
++        if (usesMvp) declarations += "uniform mat4 mg_ModelViewProjectionMatrix;\n";
++        if (usesMv) declarations += "uniform mat4 mg_ModelViewMatrix;\n";
++        if (usesProjection) declarations += "uniform mat4 mg_ProjectionMatrix;\n";
++        if (usesNormal) declarations += "uniform mat3 mg_NormalMatrix;\n";
++        source.insert(afterVersion.Get(source), declarations);
++    }
++
+     void ModernizeLegacyGLSL(MobileGL::ShaderStage stage, MobileGL::String& source, AfterVersionAnchor& afterVersion) {
+         // Precision qualifiers (highp/mediump/lowp and default-precision statements) are legal and
+         // ignored in the normalized desktop core profiles, so glslang handles them natively.
+@@ -1642,21 +1669,31 @@ namespace {
+         if (stage == MobileGL::ShaderStage::Vertex) {
+             ReplaceIdentifier(source, "attribute", "in");
+             ReplaceIdentifier(source, "varying", "out");
++            InjectCompatMatrixBuiltins(source, afterVersion);
+             return;
+         }
+ 
+         if (stage == MobileGL::ShaderStage::Fragment) {
+             ReplaceIdentifier(source, "varying", "in");
+             const bool usesFragColor = source.find("gl_FragColor") != MobileGL::String::npos;
+-            const bool usesFragData = source.find("gl_FragData") != MobileGL::String::npos;
++            // 只认真正的下标访问：`#define love_Canvases gl_FragData` 这种别名只是宏定义，
++            // 展开后一个符号都不引用，为它声明 8 个输出反而会把 mg_FragColor 挤到 location 8，
++            // 撞上 GL_MAX_DRAW_BUFFERS=8（LOVE 0.10 就是这么被拒的）。
++            const bool usesFragData = source.find("gl_FragData[") != MobileGL::String::npos ||
++                                      source.find("gl_FragData [") != MobileGL::String::npos;
+             if (usesFragColor) {
+                 ReplaceIdentifier(source, "gl_FragColor", "mg_FragColor");
+-                source.insert(afterVersion.Get(source), "out vec4 mg_FragColor;\n");
++                source.insert(afterVersion.Get(source), "layout(location = 0) out vec4 mg_FragColor;\n");
+             }
+             if (usesFragData) {
+                 ReplaceIdentifier(source, "gl_FragData", "mg_FragData");
+-                source.insert(afterVersion.Get(source), "layout(location = 0) out vec4 mg_FragData[8];\n");
++                if (usesFragColor) {
++                    MGLOG_W("shader writes both gl_FragColor and gl_FragData; the array takes location 0");
++                } else {
++                    source.insert(afterVersion.Get(source), "layout(location = 0) out vec4 mg_FragData[8];\n");
++                }
+             }
++            InjectCompatMatrixBuiltins(source, afterVersion);
+         }
+     }
+ 

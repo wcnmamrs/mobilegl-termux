@@ -1,0 +1,21 @@
+mobilegl-termux —— 许可说明
+================================================================
+
+1) 本仓库的脚本、文档、探针源码、兼容层源码
+   （scripts/、examples/、extras/*.c、docs/、README.md、install.sh）
+   → MIT，见 LICENSE。
+
+2) 预编译二进制
+   glibc/libMobileGL.so、bionic/libMobileGL.so、bionic/libMobileGLServer.so
+   是 MobileGL 的修改版产物（上游 LGPL-3.0），随 Release 提供。
+   对应源码 = 上游 https://github.com/MobileGL-Dev/MobileGL （commit 2bdbe05）
+              + 本仓库 patches/mobilegl-compat.patch
+   重新编译步骤见 docs/GUIDE.md。按 LGPL-3.0 第 4 条，这里提供对应源码的获取方式：
+   上游 commit 2bdbe05 的完整源码 + 本仓库的补丁即为完整对应源码；如需现成打包，
+   在 issues 里说一声即可提供。
+
+3) extras/libfixfunc.so、extras/libnovsync.so
+   由本仓库 extras/*.c 编译而来 → MIT。
+
+4) docs/reference/ 下的 dri3.c、renderer.c、DisplayGLX.cpp
+   摘自 Termux:X11 与 ANGLE，仅作分析参考，版权归各自作者（GPL-3.0 / BSD-3-Clause）。
