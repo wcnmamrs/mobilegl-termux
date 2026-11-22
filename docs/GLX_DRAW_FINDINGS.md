@@ -163,3 +163,22 @@ glxtrace: ReadPixels 1x1 at 100,100 fbo=2 first=255,0,0,255
 恰好落不进内容"，而自己写的同形状探针（ES3 + FBO + VAO + VBO）是全绿的。
 下一步要往 backend 走：在 Magma 的 `DrawArrays` 里打一次"当前 framebuffer/渲染通道"，
 确认 Vulkan 侧收到的是不是同一张图，再决定是 FBO 物化（twin）还是 render pass 的问题。
+
+## 追加实验五（2026-11-22 22:40）—— 回读与绘制对不到同一张图
+
+在 `ResolveWireImage` 里加了 `MOBILEGL_MAGMA_TRACE=1` 门控的日志（打印 fbo 句柄、surface 句柄、
+extent、VkImage 指针）。窗口模式跑 `tri3.html` 得到 200x200 序列：
+
+```
+write=1 fbo=23.0 surface=68.0 kind=2 extent=200x200 image=0x…bb370   ← 画到这里
+write=0 fbo=1.1  surface=43.0 kind=2 extent=200x200 image=0x…a4ab0   ← 读的是这张（另一张图）
+write=0 fbo=0.0  surface=68.0 kind=2 extent=200x200 image=0x…bb370
+```
+
+即：**绘制目标解析出的 VkImage 与回读源解析出的 VkImage 不是同一张**（surface 68 vs 43、
+fbo 23 vs 1）。同一批日志里更早的帧里 68/43 轮流当过写目标，说明记录会随帧变化。
+
+继续验证：把回读临时改成用"绘制面"的记录（`MOBILEGL_MAGMA_TRACE_READDRAW=1`）后仍是
+`readPixels=255,0,0,255` —— 说明不能只怪读写两面错位，绘制本身落进的那张图在回读时也不是
+ANGLE 认定的那张。下一步要在 `SetupWireDraw` 里记下 render pass 的实际 VkFramebuffer 与
+附件图象，与 `ReadWirePixels` 的来源三方对齐。
