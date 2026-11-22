@@ -149,7 +149,7 @@ client 需显式 `MOBILEGL_LOG_FILE_PATH=/tmp/x.log`，实际文件是 `/tmp/x.c
 即：**零拷贝带来 2× 提升，通道修复几乎无成本（58.6 vs 59.4）**。virpipe 参照 ~110 FPS。
 
 ## 验证方法
-`~/x11work/glxtest4.c`（GLSL+VBO 渐变三角形，mode 0=swap / 1=自绘 XPutImage / 2=纯红）、`t4.sh`/`t5.sh` 截图脚本。
+`tests/glxtest4.c`（开发期探针）（GLSL+VBO 渐变三角形，mode 0=swap / 1=自绘 XPutImage / 2=纯红）、`t4.sh`/`t5.sh` 截图脚本。
 判据：`xwd` 抓屏后窗口内 `unique` 数量与中心色要与 `glReadPixels` 完全一致；Mesa llvmpipe 同程序作对照基准。
 证据图：`~/mgl/dri3_colors_fixed.png`（中心 `srgb(128,64,64)` = GL 读回的 `127,64,64`）。
 
@@ -189,7 +189,7 @@ Stub function: glTranslatef / glNormal3f / glShadeModel / glVertexPointer ...
 ```
 
 所以 glxgears 这类老程序在 MobileGL 上一个三角形都画不出来。**不动 MobileGL 一行代码**的解法：
-一个 `LD_PRELOAD` 兼容层（源码 `~/x11work/fixfunc/fixfunc.c`，产物 `~/mgl/lib/libfixfunc.so`，76 KB）。
+一个 `LD_PRELOAD` 兼容层（源码 `extras/fixfunc.c`，产物 `~/mgl/lib/libfixfunc.so`，76 KB）。
 
 它把固定管线翻译成核心 profile 已有的能力：
 
@@ -232,7 +232,7 @@ MGL_LEGACY=1 source ~/mgl/env.sh                    # 整个会话都带上兼�
 | `glTexImage2D` 的**未定尺寸内部格式**（`GL_RGBA`/`GL_RGB`/`GL_BGRA`） | 翻译成 `GL_RGBA8`/`GL_RGB8`（核心 profile 拒绝旧写法，这是老程序上传纹理必踩的坑） |
 | `glTexCoordPointer` + `glEnableClientState(GL_TEXTURE_COORD_ARRAY)` | 客户端数组拷进 VBO |
 
-验证程序 `~/x11work/fixfunc/texquad.c`（老写法：`glBegin(GL_QUADS)` + `glTexCoord2f` + 未定尺寸 `GL_RGBA` 上传 2×2 棋盘）：
+验证程序 `extras/texquad.c`（老写法：`glBegin(GL_QUADS)` + `glTexCoord2f` + 未定尺寸 `GL_RGBA` 上传 2×2 棋盘）：
 - `glReadPixels`：`BL=255,0,0` / `BR=0,255,0` / `TL=0,0,255`，与预期一致
 - `xwd` 截图裁窗：`unique=4`（四个纯色象限，无串色无渗漏），证据图 `~/mgl/texquad_shot.png`
 
@@ -284,7 +284,7 @@ MGL_NOVSYNC=1 ~/mgl/mgl-run.sh glxgears -geometry 800x600
 
 MobileGL 的 Present 按 X 的 vblank 节拍走（`X11Present.cpp:252`
 `targetMsc = lastMsc + swapInterval`、`:253` `options = swapInterval > 0 ? 0 : kPresentOptionAsync`），
-默认 swapInterval=1 就是硬锁 60Hz。`libnovsync.so`（源码 `~/x11work/fixfunc/novsync.c`）
+默认 swapInterval=1 就是硬锁 60Hz。`libnovsync.so`（源码 `extras/novsync.c`）
 接管 `glXSwapIntervalEXT/MESA/SGI` 与 `glXSwapBuffers`，把 interval 一律压成 0。
 
 实测 glxgears 800x600：**59.7 → 376.7 FPS**（走 `mgl-run.sh`：393 / 222 FPS）。
@@ -305,14 +305,14 @@ MGL_NOVSYNC=1 ~/mgl/mgl-run.sh glmark2 -s 800x600
 
 ## 三个真实游戏跑通（2026-11-22 中午）
 
-用户的实际用法：**proot 里跑游戏和桌面**（`/root/pvz`、`/root/HumanResourceMachine`、`/root/Kingdom_Rush`）。
+实际用法：**proot 里跑游戏和桌面**（下文以三个样例程序说明，路径以 `<游戏目录>` 代替）。
 三款全部在 MobileGL（Magma + DRI3 零拷贝）下出画面：
 
 | 游戏 | 引擎 | 结果 | 备注 |
 |---|---|---|---|
-| 植物大战僵尸 `/root/pvz/pvz` | 原生 arm64 + SDL2 | **Avg FPS 183**，标题界面正常 | 游戏自带计数器 |
-| 王国保卫战 `/root/Kingdom_Rush` | LOVE 0.10.2 | 设置界面正常、字体清晰 | 原 `run.sh` 强制 llvmpipe，需去掉 |
-| 人力资源机器 `/root/HumanResourceMachine` | Mono/FNA + box64 | 标题界面正常 | `box64 ./HumanResourceMachine.bin.x86_64` |
+| 样例 A（arm64 + SDL2） | 原生 GL 程序 | **Avg FPS 183**，标题界面正常 | 程序自带计数器 |
+| 样例 B（LOVE 0.10.2） | 固定管线 + 兼容档 GLSL | 设置界面正常、字体清晰 | 程序自带 `run.sh` 若强制 llvmpipe 需去掉 |
+| 样例 C（Mono/FNA + box64） | x86_64 经 box64 | 标题界面正常 | `box64 ./<程序>.bin.x86_64` |
 
 ### 为此补的三处 MobileGL 兼容缺口（`~/mgl/mobilegl-compat.patch`）
 
@@ -344,7 +344,7 @@ MGL_NOVSYNC=1 ~/mgl/mgl-run.sh glmark2 -s 800x600
 ~/mgl/mgl-run.sh glxinfo -B                 # 任意 GL 程序
 ~/mgl/legacy.sh glxgears -info              # 带固定管线兼容层（glBegin 那一族）
 # 王国保卫战：先去掉 run.sh 里的 LIBGL_ALWAYS_SOFTWARE/GALLIUM_DRIVER 两行
-~/mgl/mgl-run.sh box64 /root/HumanResourceMachine/HumanResourceMachine.bin.x86_64
+~/mgl/mgl-run.sh box64 <游戏目录>/<程序>.bin.x86_64
 ```
 
 ---
@@ -386,7 +386,7 @@ chromium --app=https://example.com
 | 层 | 做法 | 效果 |
 |---|---|---|
 | 库（真·通用） | 给 GLX 层补上 `GLX_EXT_create_context_es_profile` / `_es2_profile` 与 `GLX_CONTEXT_PROFILE_MASK_ARB` 里的 ES 位（`GLXImpl.cpp` `CreateContextAttribsARB` 分派到 EGL 的 ES 上下文） | "要 ES on GLX"的程序不再整链失败；实测 `glXQueryExtensionsString` 已含该扩展，Chromium 也不再报 `Cannot create an OpenGL ES platform on GLX` |
-| 配置（按程序） | `/etc/chromium.d/50-mobilegl` 里 `unset __GLX_VENDOR_LIBRARY_NAME` | Chromium 改走 EGL/ANGLE-GLES：`readPixels=0,255,0,255`，aquarium 正常出画面 |
+| 配置（按程序） | `/etc/chromium.d/50-mobilegl` 里的旗标 | Chromium 改走 EGL/ANGLE-GLES：`readPixels=0,255,0,255`，aquarium 正常出画面 |
 
 **为什么库层修好了还要保留这行配置**：ES 上下文能建出来之后，ANGLE 的 **GLX 绘制路径**依然
 画不进 canvas（同一张 shader 三角形，`readPixels` 只读到 clear 色 `255,0,0,255`；"几何不落进
@@ -401,7 +401,7 @@ canvas"就是早先 `--use-angle=gl` 那个症状）。也就是说 GLX 这条�
 > `/etc/chromium.d/50-mobilegl` 第一行就是 `unset __GLX_VENDOR_LIBRARY_NAME`：
 > Chromium 改走 glvnd EGL → MobileGL EGL，合成与 WebGL 都仍在 Mali 上。
 >
-> `/usr/local/bin/chromium-gpu` 现在**只做透传**（`exec /usr/bin/chromium "$@"`）。早先它自己也写了一套
+> 旧的 `/usr/local/bin/chromium-gpu` 包装器**已废弃**（`exec /usr/bin/chromium "$@"`）。早先它自己也写了一套
 > `--use-angle=gl`，与 `chromium.d` 里的旗标打架——两套旗标谁生效取决于 Chromium 的解析顺序，
 > 于是同一个浏览器有时候能画、有时候报 `BindToCurrentSequence failed`。现在只留一处。
 
@@ -487,7 +487,7 @@ X11 的 EGL 窗口表面根本没有呈现通路（`GetPlatformDisplay` 收到 X
 
 ### 验证
 - `es2_info`：之前 `eglMakeCurrent() failed` → 现在 `EGL_VENDOR: MobileGL` / `GL_RENDERER: Magma (MobileGL Core) (Mali-G57 MC2, …)`
-- 自写 `~/x11work/eglwin.c`（Xlib 建窗 + `eglCreateWindowSurface` + clear + swap）：
+- 自写 `examples/eglwin.c`（Xlib 建窗 + `eglCreateWindowSurface` + clear + swap）：
   - `eglGetDisplay(Display*)`：`eglMakeCurrent=1`，截图裁窗 `unique=1 center=srgb(51,153,229)`
     （正是 `glClearColor(0.2,0.6,0.9)`）
   - `eglGetDisplay(EGL_DEFAULT_DISPLAY)`：同样 `unique=1 center=srgb(51,153,229)`

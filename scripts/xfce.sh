@@ -178,70 +178,7 @@ else
 fi
 sleep 3
 
-# ---------- 音频选择对话框（英文参数） ----------
-log "弹出音频选择窗口..."
-
-audio_choice() {
-    proot-distro login debian --shared-tmp -- bash -c '
-        export DISPLAY=:0
-
-        PIPE=$(mktemp -u /tmp/yad_audio.XXXXXX)
-        mkfifo "$PIPE"
-        trap "rm -f $PIPE" EXIT
-
-        yad --progress \
-            --title="Audio Setup" \
-            --text="Enable audio support?\nTimeout will choose No." \
-            --percentage=0 \
-            --button="Yes:0" --button="No:1" \
-            --width=450 \
-            < "$PIPE" 2>/dev/null &
-        yad_pid=$!
-
-        sleep 0.5
-        if ! kill -0 $yad_pid 2>/dev/null; then
-            echo "yad failed to start" >&2
-            exit 1
-        fi
-
-        exec 3>"$PIPE"
-
-        for i in $(seq 1 60); do
-            if ! kill -0 $yad_pid 2>/dev/null; then
-                break
-            fi
-            pct=$(( i * 100 / 60 ))
-            rem=$(( 60 - i ))
-            echo "# Countdown ${rem} sec" >&3
-            echo "$pct" >&3
-            sleep 1
-        done
-
-        exec 3>&-
-
-        if kill -0 $yad_pid 2>/dev/null; then
-            kill $yad_pid 2>/dev/null
-            wait $yad_pid
-            exit 1
-        else
-            wait $yad_pid
-            exit $?
-        fi
-    '
-}
-
-if audio_choice; then
-    log "用户选择启用音频"
-    if command -v pulseaudio >/dev/null 2>&1 && command -v pactl >/dev/null 2>&1; then
-        bash ~/music.sh &
-    else
-        log "错误：音频服务命令未安装，无法启用音频"
-    fi
-else
-    log "用户跳过音频，桌面将以无声模式运行。"
-fi
-
 log "GPU 加速：MobileGL / Magma（Mali Vulkan 直连 + DRI3 零拷贝）"
 log "自检命令：~/mgl/mgl-run.sh glxinfo -B   （应显示 Magma (MobileGL Core)）"
-log "桌面启动流程结束，按 Ctrl+C 退出脚本（但桌面仍在后台运行）"
+log "桌面启动流程结束，按 Ctrl+C 退出脚本（桌面仍在后台运行）"
 wait

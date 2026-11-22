@@ -25,11 +25,11 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-VERSION="1.0.4"
+VERSION="1.0.6"
 REPO_OWNER="wcnmamrs"
 REPO_NAME="mobilegl-termux"
 PAYLOAD_FILE="mobilegl-payload-arm64-v${VERSION}.tar.xz"
-PAYLOAD_SHA256="f20a2304303cf367eae58f8567de78924d922e00b7bb9718ee7efa72e5d9fc2f"
+PAYLOAD_SHA256="aee50827a62e468fe642b345af1623eb81a5d36e7860e4ae11930dbbffc82a8e"
 
 MGL_HOME="${MGL_HOME:-$HOME/mgl}"
 DEBIAN="${DEBIAN_NAME:-debian}"
@@ -38,7 +38,6 @@ PROOT_DIR="${PROOT_DIR:-$PROOT_BASE/$DEBIAN/rootfs}"
 CACHE_DIR="$MGL_HOME/.cache"
 LOG="$MGL_HOME/install.log"
 MANIFEST="$MGL_HOME/installed-files.txt"
-BACKUP_DIR="$MGL_HOME/.backups"
 
 ACTION="install"
 PAYLOAD_LOCAL=""
@@ -126,23 +125,6 @@ write_file_atomic() {  # <目标> <内容>
 }
 
 record() { printf '%s\n' "$1" >>"$MANIFEST"; }
-
-backup_once() {  # <文件> —— 第一次触碰时留一份**真内容**
-    local f="$1" name
-    [ -e "$f" ] || [ -L "$f" ] || return 0
-    name=$(printf '%s' "$f" | tr '/' '_')
-    [ -e "$BACKUP_DIR/$name" ] && return 0
-    mkdir -p "$BACKUP_DIR"
-    # 如果它已经是指向本工具链的软链，那不是用户的文件，没什么可备份的。
-    if [ -L "$f" ]; then
-        case "$(readlink -f "$f" 2>/dev/null)" in "$MGL_HOME"/*) return 0 ;; esac
-    fi
-    # 关键：用 -L 取真实内容，而不是 cp -a 把软链本身存下来。
-    # 早先这里用 cp -a，备份下来的是个软链；卸载时先删掉 $MGL_HOME/*.sh，
-    # 再把软链"恢复"回去，结果 ~/xfce.sh 变成一个指向已删文件的悬空链接。
-    cp -L "$f" "$BACKUP_DIR/$name" || { err "备份 $f 失败"; return 1; }
-    dim "备份 $f → $BACKUP_DIR/$name（$(wc -c <"$BACKUP_DIR/$name" | tr -d ' ') 字节）"
-}
 
 usage() { sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -292,7 +274,7 @@ install_termux_side() {
     head1 "安装 Termux 侧（脚本 / 兼容层 / 启动器 / 开机自启）"
 
     local src="$PAYLOAD_DIR"
-    mkdir -p "$MGL_HOME"/{lib,logs,.cache} "$BACKUP_DIR"
+    mkdir -p "$MGL_HOME"/{lib,logs,.cache}
 
     # 脚本
     local f base
@@ -308,15 +290,9 @@ install_termux_side() {
     install -m 755 "$src/extras/libnovsync.so" "$MGL_HOME/lib/libnovsync.so"
     ok "兼容层 → $MGL_HOME/lib（libfixfunc 老式固定管线 / libnovsync 关垂直同步）"
 
-    # 桌面启动器：~/xfce.sh 与 ~/xfce-d.sh（覆盖前先备份用户的旧脚本）
-    local launcher
-    for launcher in xfce.sh xfce-d.sh; do
-        backup_once "$HOME/$launcher"
-        ln -sfn "$MGL_HOME/$launcher" "$HOME/$launcher"
-        record "$HOME/$launcher"
-        dim "$HOME/$launcher -> $MGL_HOME/$launcher"
-    done
-    ok "桌面启动器 ~/xfce.sh、~/xfce-d.sh 已指向本工具链"
+    # 不再往 $HOME 里放任何软链：工具链自己的入口就是 ~/mgl/xfce.sh，
+    # 用户的 ~/xfce.sh 属于用户，装/卸都不碰。
+    dim "桌面入口：~/mgl/xfce.sh（未在 $HOME 建任何软链）"
 
     # 开机自启（Termux:Boot）
     if [ -d "$HOME/.termux" ]; then
@@ -618,35 +594,21 @@ uninstall_all() {
         ok "已按安装清单清理 Termux 侧文件"
     fi
 
-    local l
-    for l in xfce.sh xfce-d.sh; do
-        if [ -L "$HOME/$l" ]; then rm -f "$HOME/$l"; ok "已删启动器 ~/$l"; fi
-    done
     if [ -L "$HOME/.termux/boot/mobilegl-server.sh" ] || [ -f "$HOME/.termux/boot/mobilegl-server.sh" ]; then
         rm -f "$HOME/.termux/boot/mobilegl-server.sh"; ok "已删开机自启"
     fi
 
-    # 恢复备份（用户原本的脚本）：两个启动器都要恢复，且必须是真文件不是悬空软链
-    local b
-    for b in xfce.sh xfce-d.sh; do
-        if [ -f "$BACKUP_DIR/_data_data_com.termux_files_home_$b" ]; then
-            cp -a --remove-destination "$BACKUP_DIR/_data_data_com.termux_files_home_$b" "$HOME/$b"
-            if [ -f "$HOME/$b" ] && [ ! -L "$HOME/$b" ]; then
-                ok "已恢复你原来的 ~/$b（$(wc -c <"$HOME/$b" | tr -d ' ') 字节）"
-            else
-                err "恢复 ~/$b 后仍不是普通文件，请检查 $BACKUP_DIR"
-            fi
-        fi
-    done
-    # 备份里存的若是我们自己的旧软链（v1.0.3 及更早的备份），别拿它去恢复
-    for b in xfce.sh xfce-d.sh; do
-        if [ -L "$HOME/$b" ] && [ ! -e "$HOME/$b" ]; then
-            rm -f "$HOME/$b"
-            info "~/$b 是旧的悬空软链，已删除（原始脚本备份在 $BACKUP_DIR）"
-        fi
-    done
-
+    # $HOME 下没有本工具链的任何文件（入口在 ~/mgl），因此不做任何清理
     rm -rf "$MGL_HOME/lib" "$MGL_HOME"/*.sh "$MGL_HOME/.cache"
+    # 旧版本（<= v1.0.4）在本工具链里往 $HOME 放过软链，只清这种指向 ~/mgl 的残留，
+    # 用户自己的同名文件一律不碰。
+    for b in xfce.sh xfce-d.sh; do
+        if [ -L "$HOME/$b" ]; then
+            case "$(readlink "$HOME/$b" 2>/dev/null)" in
+                "$MGL_HOME"/*) rm -f "$HOME/$b"; info "已清掉旧版本留下的软链 ~/$b" ;;
+            esac
+        fi
+    done
     ok "Termux 侧脚本与载荷缓存已清理（日志与备份保留在 $MGL_HOME）"
 
     [ "$fails" -eq 0 ] && { ok "卸载完成，图形加速已完全移除"; return 0; }
@@ -703,7 +665,7 @@ main() {
     ok "GLX 与 EGL 都已走手机 GPU"
     printf '\n'
     printf '  日常用法\n'
-    printf '    %s~/xfce.sh%s                  开桌面（自动确保服务端与 X）\n' "$C_B" "$C_RST"
+    printf '    %s~/mgl/xfce.sh%s              开桌面（自动确保服务端与 X）\n' "$C_B" "$C_RST"
     printf '    %sbash ~/mgl/gpu-check.sh%s     体检（两条路都出现 Magma 即正常）\n' "$C_B" "$C_RST"
     printf '    %sbash ~/mgl/gpu-check.sh 程序%s 用完整 GPU 环境跑任意程序\n' "$C_B" "$C_RST"
     printf '    %sbash install.sh --uninstall%s  卸载（按清单逐项删除并校验）\n' "$C_B" "$C_RST"

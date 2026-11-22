@@ -71,7 +71,7 @@ shots/                          实拍证据（Chromium / mpv / 三个游戏 / �
 2. **取载荷并三重校验**：整包 `sha256` → 包内 `MANIFEST.sha256` → 逐文件 `sha256sum -c`。
    三个下载源（GitHub 直连 + 两个镜像）依次重试，本地包可用 `--payload` 指定。
 3. **装两侧**：
-   - Termux：`~/mgl/`（12 个脚本、兼容层、服务端二进制、库）、`~/xfce.sh`+`~/xfce-d.sh` 软链、Termux:Boot 自启。
+   - Termux：`~/mgl/`（12 个脚本、兼容层、服务端二进制、库）、`~/mgl/xfce.sh`+`~/mgl/xfce-d.sh`、Termux:Boot 自启。
    - 容器：`/opt/mobilegl/lib/libMobileGL.so`、glvnd EGL 描述、`libGLX_mobilegl.so.0`、
      `/etc/profile.d/mobilegl.sh`、`/etc/environment.d/10-mobilegl.conf`、
      `/etc/mobilegl/client.conf`、`/etc/chromium.d/50-mobilegl`、`ldconfig`。
@@ -148,7 +148,7 @@ install -m 755 ~/src/MobileGL/build-bionic/libMobileGLServer.so ~/mgl/lib/
 日常：
 
 ```bash
-~/xfce.sh                          # 开桌面（自动确保服务端与 X）
+~/mgl/xfce.sh                      # 开桌面（自动确保服务端与 X）
 bash ~/mgl/gpu-check.sh            # 体检：两条路都出现 Magma 即正常
 bash ~/mgl/gpu-check.sh 程序名      # 用完整 GPU 环境跑任意程序
 ```
@@ -168,7 +168,7 @@ bash ~/mgl/gpu-check.sh 程序名      # 用完整 GPU 环境跑任意程序
 | `gpu-check.sh` | 四段体检；`gpu-check.sh <程序>` 用完整环境跑单个程序 |
 | `switch.sh` | `mobilegl` / `virpipe` / `status` / `ensure` / `desktop` / `bench` |
 | `legacy.sh` | 带 GL1.x 兼容层跑老程序 |
-| `xfce.sh` / `xfce-d.sh` | 起 / 停整台桌面 |
+| `xfce.sh` / `xfce-d.sh` | 起 / 停整台桌面（在 `~/mgl/` 里，不在 `$HOME` 放软链）|
 
 改路径就看脚本开头的变量：`MGL_BUILD`、`MGL_GLIBC`、`MGL_HOME`、`MGL_ENDPOINT`、`MGL_SESSIONS`、`PROOT_DIR`。
 默认值按 Termux 标准布局写死（`/data/data/com.termux/files/home`），换设备时改这几行即可。

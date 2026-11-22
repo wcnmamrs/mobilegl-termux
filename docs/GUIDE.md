@@ -318,7 +318,7 @@ direct rendering: Yes
 proot 里 `startxfce4`（带 MobileGL 环境）→ 重新拉起 Termux:X11 Activity。
 
 ```bash
-bash ~/xfce.sh      # 起桌面
+bash ~/mgl/xfce.sh      # 起桌面
 bash ~/xfce-d.sh    # 停所有（桌面 + X + GPU 服务端 + 容器 + 音频）
 ```
 
@@ -328,7 +328,7 @@ bash ~/xfce-d.sh    # 停所有（桌面 + X + GPU 服务端 + 容器 + 音频�
 想给桌面里所有 GL 程序关掉垂直同步（默认贴 60Hz）：
 
 ```bash
-MGL_NOVSYNC=1 bash ~/xfce.sh
+MGL_NOVSYNC=1 bash ~/mgl/xfce.sh
 ```
 
 ---
@@ -448,7 +448,7 @@ bash ~/xfce-d.sh             # 停桌面/ X / 容器
 ├── cc_backend.sh         同上，后端目录用
 ├── link_so.sh / link_srv.sh   单目标重链
 └── mobilegl-*.patch      MobileGL 源码补丁
-~/xfce.sh                 桌面启动（MobileGL）
+~/mgl/xfce.sh                 桌面启动（MobileGL）
 ~/xfce-d.sh               全停
 ```
 

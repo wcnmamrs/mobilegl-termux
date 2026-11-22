@@ -54,9 +54,8 @@ killeq virgl_test_server_android
 log "4/5 停止 debian 容器"
 proot-distro stop debian 2>/dev/null || true
 
-# 5. 音频服务与 X11 客户端 Activity
-log "5/5 停止音频服务 / Termux:X11 Activity"
-bash ~/music.sh exit 2>/dev/null || true
+# 5. X11 客户端 Activity
+log "5/5 停止 Termux:X11 Activity"
 killeq com.termux.x11
 
 log "所有服务已停止"
