@@ -1,5 +1,9 @@
 # 变更记录
 
+> 仓库只保留最新版本的 release；旧版本的 tag 与二进制资产已清理。
+> 下表保留每次的改动与载荷 sha256，需要旧二进制请用对应提交 + `docs/GUIDE.md` 重建。
+
+
 - **GLX 层补 `GLX_EXT_create_context_es_profile`**（库改动，随载荷发布；本次只进源码树）：
   `GLX_CONTEXT_PROFILE_MASK_ARB` 里的 ES 位现在会分派到 EGL 的 ES 上下文（`BindAPI(EGL_OPENGL_ES_API)`
   + `EGL_OPENGL_ES2_BIT`）。效果：Chromium 不再因为在 GLX 上建不出 ES 上下文而整链 `eglInitialize`

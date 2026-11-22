@@ -108,8 +108,9 @@ shots/                          实拍证据（Chromium / mpv / DRI3 通道顺�
 - `v1.1.x`：新增能力（如新的 GL 路径、新的验收项）
 - `v2.0.0`：载荷布局或配置项不兼容
 
-历史版本一律保留，`docs/CHANGELOG.md` 里记着每个版本的载荷 sha256 与改动。
-即便某个 release 的二进制资产已不可得，也能用对应 tag 的源码 + `docs/GUIDE.md` 重建。
+**只保留当前版本**：`releases` 里只有最新一个版本，旧版本的 tag / 二进制资产不保留。
+每个版本的改动与载荷 sha256 记在 `docs/CHANGELOG.md` 里，需要旧二进制时用对应提交 + `docs/GUIDE.md` 重建。
+已经装过旧版的机器，直接跑新版 `install.sh` 覆盖即可；要回到"没有任何加速"的状态跑 `--uninstall`。
 
 ## 支持范围
 
