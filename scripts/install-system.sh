@@ -16,7 +16,13 @@
 set -eu
 
 MGL_HOME=${MGL_HOME:-$HOME/mgl}
-MGL_CLIENT_LIB=${MGL_CLIENT_LIB:-$HOME/src/MobileGL/build-glibc/libMobileGL.so}
+if [ -z "${MGL_CLIENT_LIB:-}" ]; then
+    if [ -f "$PROOT_DIR/opt/mobilegl/lib/libMobileGL.so" ]; then
+        MGL_CLIENT_LIB="$PROOT_DIR/opt/mobilegl/lib/libMobileGL.so"
+    else
+        MGL_CLIENT_LIB="$HOME/src/MobileGL/build-glibc/libMobileGL.so"
+    fi
+fi
 PROOT_DIR=${PROOT_DIR:-$PREFIX/var/lib/proot-distro/containers/debian/rootfs}
 DEBIAN=${DEBIAN:-debian}
 ACTION=${1:-install}

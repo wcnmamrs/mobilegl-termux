@@ -25,8 +25,8 @@ killeq() {
 set -u
 
 MGL_DIR="$HOME/mgl"
-MGL_CLIENT="$HOME/src/MobileGL/build-glibc"
-MGL_SERVER="$HOME/src/MobileGL/build-bionic"
+MGL_SERVER="$HOME/mgl/lib"
+MGL_CLIENT_IN_CONTAINER="/opt/mobilegl/lib"
 
 log() {
     echo "[$(date '+%H:%M:%S')] $*"
@@ -47,10 +47,11 @@ require_cmd termux-x11
 require_cmd am
 require_cmd proot-distro
 
-[ -f "$MGL_CLIENT/libMobileGL.so" ] ||
-    error_exit "MobileGL 客户端库不存在：$MGL_CLIENT/libMobileGL.so（需要先在 proot 里编译）"
+CLIENT_LIB_HOST="${PROOT_DIR:-$PREFIX/var/lib/proot-distro/containers/debian/rootfs}/opt/mobilegl/lib/libMobileGL.so"
+[ -f "$CLIENT_LIB_HOST" ] ||
+    error_exit "客户端库不存在：$CLIENT_LIB_HOST（先跑 install.sh）"
 [ -x "$MGL_SERVER/libMobileGLServer.so" ] ||
-    error_exit "MobileGL 服务端不存在：$MGL_SERVER/libMobileGLServer.so（需要先在 Termux 里编译）"
+    error_exit "服务端不存在：$MGL_SERVER/libMobileGLServer.so（先跑 install.sh）"
 [ -x "$MGL_DIR/ensure-server.sh" ] ||
     error_exit "缺少 $MGL_DIR/ensure-server.sh"
 

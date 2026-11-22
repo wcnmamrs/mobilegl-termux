@@ -6,7 +6,14 @@
 #   存在则 exit 65
 set -u
 
-BUILD=${MGL_BUILD:-$HOME/src/MobileGL/build-bionic}
+# 服务端镜像：装了就用 ~/mgl/lib 里的（普通用户只有这份），开发者可显式指定源码产物
+if [ -n "${MGL_BUILD:-}" ]; then
+    BUILD="$MGL_BUILD"
+elif [ -x "$HOME/mgl/lib/libMobileGLServer.so" ]; then
+    BUILD="$HOME/mgl/lib"
+else
+    BUILD="$HOME/src/MobileGL/build-bionic"
+fi
 IMAGE="$BUILD/libMobileGLServer.so"
 # 注意：这里是 SERVER 侧参数。@name 才是抽象 socket。
 # 写成 unix:@name 会让 SocketTransport::Listen 把它当文件系统路径，

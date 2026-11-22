@@ -90,7 +90,11 @@ bench)
   proot-distro login debian --shared-tmp -- /bin/bash -c '
     export DISPLAY=:0
     if [ -n "${MGL_BENCH:-}" ]; then
-      export LD_LIBRARY_PATH=/data/data/com.termux/files/home/src/MobileGL/build-glibc
+      if [ -f /opt/mobilegl/lib/libMobileGL.so ]; then
+          export LD_LIBRARY_PATH=/opt/mobilegl/lib
+      else
+          export LD_LIBRARY_PATH=/data/data/com.termux/files/home/src/MobileGL/build-glibc
+      fi
       export __GLX_VENDOR_LIBRARY_NAME=mobilegl MOBILEGL_TRANSPORT=spawn
       export MOBILEGL_IPC_CONTROL=unix:@mobilegl MOBILEGL_IPC_DATA=auto
       export MOBILEGL_BACKEND_TYPE=DirectVulkan MOBILEGL_IPC_STAGE_MB=256

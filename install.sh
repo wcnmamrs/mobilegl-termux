@@ -29,7 +29,7 @@ VERSION="1.0.1"
 REPO_OWNER="wcnmamrs"
 REPO_NAME="mobilegl-termux"
 PAYLOAD_FILE="mobilegl-payload-arm64-v${VERSION}.tar.xz"
-PAYLOAD_SHA256="99832feab114269d0004fb5a29bbb460a75f71e9513b8163e05ae1f23c374586"
+PAYLOAD_SHA256="394b4ab8bb59edbb2f333007a88008ede223a32c3edbcc42f49eca926dbf5f11"
 
 MGL_HOME="${MGL_HOME:-$HOME/mgl}"
 DEBIAN="${DEBIAN_NAME:-debian}"
@@ -419,16 +419,14 @@ MOBILEGL_IPC_PROBE_TIMEOUT_MS=250'
 start_and_wait_server() {
     head1 "启动 GPU 服务端（Termux 侧）"
 
-    local image="$HOME/src/MobileGL/build-bionic/libMobileGLServer.so"
-    if [ -f "$MGL_HOME/lib/libMobileGLServer.so" ]; then
-        image="$MGL_HOME/lib/libMobileGLServer.so"
-    fi
-
-    # 服务端二进制也随载荷装到 ~/mgl/lib，避免依赖源码目录
-    if [ ! -f "$MGL_HOME/lib/libMobileGLServer.so" ]; then
-        install -m 755 "$PAYLOAD_DIR/bionic/libMobileGLServer.so" "$MGL_HOME/lib/libMobileGLServer.so"
+    # 服务端二进制随载荷装到 ~/mgl/lib —— 普通用户没有源码树，这里必须自给自足。
+    local image="$MGL_HOME/lib/libMobileGLServer.so"
+    if [ ! -f "$image" ] || [ "$FORCE" = 1 ] || [ "$(sha_of "$image")" != "$(sha_of "$PAYLOAD_DIR/bionic/libMobileGLServer.so")" ]; then
+        install -m 755 "$PAYLOAD_DIR/bionic/libMobileGLServer.so" "$image"
         install -m 755 "$PAYLOAD_DIR/bionic/libMobileGL.so" "$MGL_HOME/lib/libMobileGL.so"
-        ok "服务端二进制 → $MGL_HOME/lib（$image）"
+        ok "服务端二进制 → $image（$(du -h "$MGL_HOME/lib/libMobileGL.so" | awk '{print $1}')）"
+    else
+        ok "服务端二进制已是最新（$image）"
     fi
 
     if bash "$MGL_HOME/ensure-server.sh" >/dev/null 2>&1; then
