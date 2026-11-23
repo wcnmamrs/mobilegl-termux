@@ -119,8 +119,8 @@ shots/                          实拍证据（Chromium / mpv / DRI3 通道顺�
 |---|---|
 | 设备 | arm64-v8a（aarch64）手机/平板，Android 8.0+（API 26+，库按 26 构建） |
 | Termux | 官方 Termux（bionic）；服务端就跑在 Termux 这一侧，直接 dlopen 系统 `libvulkan.so` 拿 Mali |
-| 容器 | **Debian 13 / Ubuntu 24.04 及以上**；载荷需要 `glibc ≥ 2.38`、`GLIBCXX ≥ 3.4.32`（`install.sh` 会预检并给出中文提示） |
-| proot-distro | v4 的容器路径布局（`$PREFIX/var/lib/proot-distro/containers/<名字>`）；容器名可用 `DEBIAN_NAME=` 覆盖 |
+| 容器 | 自动探测（唯一就直用、多个就列出来让你选、也可 `--distro` 指定）；需 **glibc 系**，**Debian 13 / Ubuntu 24.04 及以上**；载荷需要 `glibc ≥ 2.38`、`GLIBCXX ≥ 3.4.32`（`install.sh` 会预检并给出中文提示） |
+| proot-distro | v4 的容器路径布局（`$PREFIX/var/lib/proot-distro/containers/<名字>`）；容器名可用 `--distro NAME` 指定（或 `DISTRO_NAME=` 环境变量） |
 | 桌面/窗口程序 | 需要 `termux-x11`（可选；只跑离屏 GL 不需要） |
 | 已知不适用 | Alpine（musl）、未适配的 Arch/Fedora 容器 —— 多架构库目录会自动探测，但 `apt` 安装步骤与 glibc 版本需自行处理 |
 
@@ -144,6 +144,7 @@ bash ~/mgl-src/install.sh
 bash ~/mgl-src/install.sh --check        # 只体检，不改文件
 bash ~/mgl-src/install.sh --uninstall    # 卸载（按清单逐项删除并校验）
 bash ~/mgl-src/install.sh --payload x.tar.xz   # 离线安装
+bash ~/mgl-src/install.sh --distro ubuntu      # 指定容器（不指定且存在多个时会列出来让你选）
 ```
 
 想自己从源码编（改补丁、换设备、看细节）：照 `docs/GUIDE.md` 走一遍，产物在
