@@ -343,7 +343,7 @@ Magma 把固定管线入口（`glBegin/glVertex3f/glEnd`、显示列表、客户
 2. **程序是普通链接 OpenGL 的** → 用 `libfixfunc.so` 在 GL 之上做翻译：
 
 ```bash
-cd ~/x11work/fixfunc && gcc -O2 -shared -fPIC -o ~/mgl/lib/libfixfunc.so fixfunc.c -lm -ldl
+cd <仓库>/extras && gcc -O2 -shared -fPIC -o ~/mgl/lib/libfixfunc.so fixfunc.c -lm -ldl
 ~/mgl/legacy.sh glxgears            # = 注入 env + LD_PRELOAD=libfixfunc.so
 ```
 

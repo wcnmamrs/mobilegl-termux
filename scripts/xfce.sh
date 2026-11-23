@@ -92,7 +92,7 @@ log "检查 MobileGL GPU 服务端 (Magma / Mali Vulkan)..."
 # server 起不来也会被当成成功（踩过一次）。
 ensure_out=$(bash "$MGL_DIR/ensure-server.sh" 2>&1) || ensure_rc=$?
 ensure_rc=${ensure_rc:-0}
-echo "$ensure_out" | tail -3
+printf '%s\n' "$ensure_out" | grep -v '^[[:space:]]*$' | tail -3
 [ "$ensure_rc" -eq 0 ] || error_exit "MobileGL 服务端启动失败，见 /storage/emulated/0/MG/latest.server.log"
 log "GPU 服务端就绪 (endpoint=@mobilegl)"
 
@@ -177,6 +177,26 @@ else
     log "Activity 已启动"
 fi
 sleep 3
+
+# ---------- 可选：音频钩子 ----------
+# 可选钩子：给一个可执行文件路径，桌面起来后问你要不要跑它。工具链不建、不改、不猜，
+# 你没设 MGL_AUDIO_HOOK 就完全不出现这一步。
+AUDIO_HOOK="${MGL_AUDIO_HOOK:-}"
+if [ -x "$AUDIO_HOOK" ]; then
+    if command -v yad >/dev/null 2>&1; then
+        log "音频钩子：$AUDIO_HOOK（${MGL_AUDIO_TIMEOUT:-60} 秒后自动启动）"
+        yad --title="音频" --text="现在启动音频？\n$AUDIO_HOOK" \
+            --button="跳过:1" --button="启动:0" \
+            --timeout="${MGL_AUDIO_TIMEOUT:-60}" --timeout-indicator=bottom >/dev/null 2>&1
+        case $? in
+            0) bash "$AUDIO_HOOK" >/dev/null 2>&1 & log "音频已启动 (PID $!)" ;;
+            *) log "已跳过音频" ;;
+        esac
+    else
+        log "音频钩子：无 yad，直接后台启动 $AUDIO_HOOK"
+        bash "$AUDIO_HOOK" >/dev/null 2>&1 &
+    fi
+fi
 
 log "GPU 加速：MobileGL / Magma（Mali Vulkan 直连 + DRI3 零拷贝）"
 log "自检命令：~/mgl/mgl-run.sh glxinfo -B   （应显示 Magma (MobileGL Core)）"

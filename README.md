@@ -184,7 +184,7 @@ bash ~/mgl/gpu-check.sh 程序名      # 用完整 GPU 环境跑任意程序
 | `gpu-check.sh` | 四段体检；`gpu-check.sh <程序>` 用完整环境跑单个程序 |
 | `switch.sh` | `mobilegl` / `virpipe` / `status` / `ensure` / `desktop` / `bench`（`virpipe` 需要自行 `pkg install virglrenderer-android angle-android`）|
 | `legacy.sh` | 带 GL1.x 兼容层跑老程序 |
-| `xfce.sh` / `xfce-d.sh` | 起 / 停整台桌面（在 `~/mgl/` 里，不在 `$HOME` 放软链）|
+| `xfce.sh` / `xfce-d.sh` | 起 / 停整台桌面（在 `~/mgl/` 里，不在 `$HOME` 放软链）；可选钩子 `MGL_AUDIO_HOOK=<可执行文件>`（不设就没有这一步；有 `yad` 时弹选择框，`MGL_AUDIO_TIMEOUT` 默认 60 秒）|
 
 改路径就看脚本开头的变量：`MGL_BUILD`、`MGL_GLIBC`、`MGL_HOME`、`MGL_ENDPOINT`、`MGL_SESSIONS`、`PROOT_DIR`。
 默认值按 Termux 标准布局写死（`/data/data/com.termux/files/home`），换设备时改这几行即可。

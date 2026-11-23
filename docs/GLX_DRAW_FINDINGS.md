@@ -10,7 +10,7 @@
 - `CreateContextAttribsARB`：识别 `GLX_CONTEXT_ES_PROFILE_BIT_EXT (0x4)`，用 `EGL_CONTEXT_CLIENT_VERSION` 建 ES2/ES3 上下文
 
 ## 实测（决定性）
-探针 `~/x11work/glxprobe3.c`（五种 profile 建上下文）：
+探针 `glxprobe3.c`（五种 profile 建上下文）：
 ```
 compat-4.6  ctx ok  make=1  renderer=Magma (MobileGL Core) (Mali-G57 MC2 …)
 core-3.3    ctx ok  make=1
@@ -18,7 +18,7 @@ core-4.6    ctx ok  make=1
 es-2.0      ctx ok  make=1
 es-3.0      ctx ok  make=1
 ```
-探针 `~/x11work/glxprobe4.c`（每种 profile 清红底 + 画全屏绿三角 + 读中心像素）：
+探针 `glxprobe4.c`（每种 profile 清红底 + 画全屏绿三角 + 读中心像素）：
 ```
 compat-4.6  err_draw=0x0    centre=0,255,0,255   ✅ 画出来了
 core-3.3    err_draw=0x502  centre=255,0,0,255   （探针用了 client-side array，core 下非法，探针问题）
