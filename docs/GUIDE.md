@@ -314,12 +314,17 @@ direct rendering: Yes
 
 ## 9. 桌面（XFCE）
 
-`xfce.sh` 做四件事：清理旧进程 → `ensure-server.sh` 确认 GPU 服务端活着 → 起 `termux-x11 :0` →
-proot 里 `startxfce4`（带 MobileGL 环境）→ 重新拉起 Termux:X11 Activity。
+本项目不提供桌面启动器。要起图形桌面，自己按下面三步来（顺序不能反）：
 
 ```bash
-bash ~/mgl/xfce.sh      # 起桌面
-bash ~/xfce-d.sh    # 停所有（桌面 + X + GPU 服务端 + 容器 + 音频）
+bash ~/mgl/ensure-server.sh                       # 1. GPU 服务端
+termux-x11 :0 -listen unix &                      # 2. X 服务器
+proot-distro login debian --shared-tmp -- /bin/bash -lc 'DISPLAY=:0 startxfce4'   # 3. 桌面
+```
+
+```bash
+bash ~/mgl/ensure-server.sh   # 起服务端
+bash ~/mgl/stop-server.sh   # 停 GPU 服务端（桌面与 X 由你自己的脚本管）
 ```
 
 桌面本身不用 OpenGL（XFCE 走 XRender），GPU 加速只影响桌面里跑的 GL 程序。所以截图验证请用
@@ -328,7 +333,7 @@ bash ~/xfce-d.sh    # 停所有（桌面 + X + GPU 服务端 + 容器 + 音频�
 想给桌面里所有 GL 程序关掉垂直同步（默认贴 60Hz）：
 
 ```bash
-MGL_NOVSYNC=1 bash ~/mgl/xfce.sh
+MGL_NOVSYNC=1 <你的桌面启动命令>
 ```
 
 ---
@@ -422,7 +427,7 @@ glMultMatrixf/glTranslatef/glRotatef/glScalef/glOrtho/glFrustum/glPushMatrix/glP
 ```bash
 . ~/mgl/env.sh stop          # 容器里撤销 GL 覆写，回到 Mesa
 bash ~/mgl/stop-server.sh    # 停 GPU 服务端
-bash ~/xfce-d.sh             # 停桌面/ X / 容器
+pkill termux-x11             # 停 X（桌面随之退出）
 ```
 
 想彻底不用 split（省内存、但只能软渲染）：把 `MOBILEGL_TRANSPORT` 设成 `monolith` 即可同进程运行，
@@ -440,15 +445,12 @@ bash ~/xfce-d.sh             # 停桌面/ X / 容器
 ├── env.sh                客户端环境（. env.sh / . env.sh stop）
 ├── mgl-run.sh            Termux 侧一行跑任意 GL 程序：ensure-server + 进 proot + 注入
 ├── legacy.sh             同上，额外注入 libfixfunc.so（GL 1.x 程序）
-├── xfce-mobilegl.sh      完整桌面链路
 ├── lib/libfixfunc.so     GL 1.x 兼容层
 ├── lib/libnovsync.so     垂直同步旁路
 ├── cc_server.sh          单文件重编（从 compile_commands.json 取原始命令）
 ├── cc_backend.sh         同上，后端目录用
 ├── link_so.sh / link_srv.sh   单目标重链
 └── mobilegl-*.patch      MobileGL 源码补丁
-~/mgl/xfce.sh                 桌面启动（MobileGL）
-~/xfce-d.sh               全停
 ```
 
 ---

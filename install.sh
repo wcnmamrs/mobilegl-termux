@@ -30,7 +30,7 @@ VERSION="1.0.9"
 REPO_OWNER="wcnmamrs"
 REPO_NAME="mobilegl-termux"
 PAYLOAD_FILE="mobilegl-payload-arm64-v${VERSION}.tar.xz"
-PAYLOAD_SHA256="b7a133b7370ccb66c1d74dc18d229bd25c5d9015fdc03eaa3736f33876e634c5"
+PAYLOAD_SHA256="d7212195aa4c45efe117acf4bdcc42f119ce5c8fa54eed96f4100728eac585df"
 
 MGL_HOME="${MGL_HOME:-$HOME/mgl}"
 DISTRO="${DISTRO_NAME:-}"          # 为空 = 自动探测 / 询问
@@ -207,7 +207,7 @@ select_distro() {
 
     if [ "${#names[@]}" -eq 0 ]; then
         die "没找到任何 proot 容器（$PROOT_BASE 下没有 */rootfs）
-    先装一个：proot-distro install debian" 3
+    先装一个：proot-distro install <发行版>" 3
     fi
 
     if [ -n "$DISTRO_ARG" ]; then
@@ -427,9 +427,9 @@ install_termux_side() {
     install -m 755 "$src/extras/libnovsync.so" "$MGL_HOME/lib/libnovsync.so"
     ok "兼容层 → $MGL_HOME/lib（libfixfunc 老式固定管线 / libnovsync 关垂直同步）"
 
-    # 不再往 $HOME 里放任何软链：工具链自己的入口就是 ~/mgl/xfce.sh，
-    # 用户的 ~/xfce.sh 属于用户，装/卸都不碰。
-    dim "桌面入口：~/mgl/xfce.sh（未在 $HOME 建任何软链）"
+    # 装完只保证"GPU 加速对任何 GUI 程序透明生效"；桌面怎么起是用户自己的事，
+    # 所以这里不放任何启动器、也不碰 $HOME 里已有的脚本。
+    dim "GPU 加速已生效，直接开你自己的桌面即可"
 
     # 开机自启（Termux:Boot）
     if [ -d "$HOME/.termux" ]; then
@@ -536,12 +536,14 @@ MOBILEGL_IPC_PROBE_TIMEOUT_MS=250'
 
     # 6b. GL 1.x 兼容包装器：Magma（Vulkan 后端）把 glBegin/glVertex*/显示列表实现成空 stub，
     #     老程序直接跑会得到黑窗口。legacy 通过 LD_PRELOAD 把立即模式翻译成 VBO + 着色器。
+    # 注意：包装器运行在容器里，它自己的 $HOME 是 /root，所以这里必须把 Termux 侧的
+    # 绝对路径写死进去 —— 用安装时的 $MGL_HOME 展开，而不是固定某个用户名下的路径。
     write_file_atomic "$PROOT_DIR/usr/local/bin/legacy" \
-        '#!/bin/sh
+        "#!/bin/sh
 # 给 Magma 补上 GL 1.x 固定管线（立即模式 / 矩阵栈 / 显示列表 / 客户端数组 / 纹理）。
-MGL_SHIM=/data/data/com.termux/files/home/mgl/lib/libfixfunc.so
-[ -f "$MGL_SHIM" ] || { echo "legacy: 找不到 $MGL_SHIM（运行 install.sh 安装）" >&2; exit 1; }
-LD_PRELOAD="$MGL_SHIM${LD_PRELOAD:+:$LD_PRELOAD}" exec "$@"'
+MGL_SHIM=$MGL_HOME/lib/libfixfunc.so
+[ -f \"\$MGL_SHIM\" ] || { echo \"legacy: 找不到 \$MGL_SHIM（重新运行 install.sh）\" >&2; exit 1; }
+LD_PRELOAD=\"\$MGL_SHIM\${LD_PRELOAD:+:\$LD_PRELOAD}\" exec \"\$@\""
     chmod 755 "$PROOT_DIR/usr/local/bin/legacy" 2>/dev/null || true
     record "$PROOT_DIR/usr/local/bin/legacy"
     ok "GL 1.x 兼容包装器 → /usr/local/bin/legacy（容器内用 legacy <命令>）"
@@ -751,13 +753,6 @@ uninstall_all() {
     rm -rf "$MGL_HOME/lib" "$MGL_HOME"/*.sh "$MGL_HOME/.cache"
     # 旧版本（<= v1.0.4）在本工具链里往 $HOME 放过软链，只清这种指向 ~/mgl 的残留，
     # 用户自己的同名文件一律不碰。
-    for b in xfce.sh xfce-d.sh; do
-        if [ -L "$HOME/$b" ]; then
-            case "$(readlink "$HOME/$b" 2>/dev/null)" in
-                "$MGL_HOME"/*) rm -f "$HOME/$b"; info "已清掉旧版本留下的软链 ~/$b" ;;
-            esac
-        fi
-    done
     ok "Termux 侧脚本与载荷缓存已清理（日志与备份保留在 $MGL_HOME）"
 
     [ "$fails" -eq 0 ] && { ok "卸载完成，图形加速已完全移除"; return 0; }
@@ -784,7 +779,7 @@ show_help_popup() {
     text="MobileGL 已经装好了，日常就这么用：
 
 1) 开桌面
-     ~/mgl/xfce.sh
+     开你自己的桌面（比如你平时用的启动脚本，或在容器里 DISPLAY=:0 startxfce4）
 
 2) 体检（GLX 与 EGL 两条路都应显示 Magma）
      bash ~/mgl/gpu-check.sh
@@ -797,7 +792,7 @@ show_help_popup() {
      legacy <程序>
 
 5) 关桌面 / 停服务端
-     bash ~/mgl/xfce-d.sh
+     关桌面就用你自己的方式；要停 GPU 服务端：bash ~/mgl/stop-server.sh
 
 6) 卸载
      bash install.sh --uninstall
@@ -855,7 +850,7 @@ main() {
     show_help_popup
     printf '\n'
     printf '  日常用法\n'
-    printf '    %s~/mgl/xfce.sh%s              开桌面（自动确保服务端与 X）\n' "$C_B" "$C_RST"
+    printf '    %s<你自己的桌面启动脚本>%s      桌面/程序自动走 GPU（已配置好 profile.d）\n' "$C_B" "$C_RST"
     printf '    %sbash ~/mgl/gpu-check.sh%s     体检（两条路都出现 Magma 即正常）\n' "$C_B" "$C_RST"
     printf '    %sbash ~/mgl/gpu-check.sh 程序%s 用完整 GPU 环境跑任意程序\n' "$C_B" "$C_RST"
     printf '    %sbash install.sh --uninstall%s  卸载（按清单逐项删除并校验）\n' "$C_B" "$C_RST"

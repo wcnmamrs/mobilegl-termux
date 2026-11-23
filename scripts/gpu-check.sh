@@ -42,7 +42,7 @@ echo
 echo "=== 2. GLX（glxinfo）================================"
 GLX_OUT=$(proot_sh 'glxinfo -B 2>/dev/null' | grep -E 'OpenGL (renderer|vendor|core profile version)' || true)
 if [ -z "$GLX_OUT" ]; then
-    red "  未取到（X 没开？先跑 ~/xfce.sh）"
+    red "  未取到（X 没开？先起你自己的 X 服务器）"
 else
     echo "$GLX_OUT" | sed 's/^/  /'
     case "$GLX_OUT" in

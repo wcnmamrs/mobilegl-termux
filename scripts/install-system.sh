@@ -83,7 +83,7 @@ export MOBILEGL_BACKEND_TYPE=DirectVulkan
 export MOBILEGL_IPC_PROBE_TIMEOUT_MS=250
 unset __glx_vendor
 SH
-# /etc/environment.d 只给读它的东西（systemd 类）用；GUI 会话真靠 profile.d + xfce.sh
+# /etc/environment.d 只给读它的东西（systemd 类）用；GUI 会话真靠 profile.d
 cat > "$PROOT_DIR/etc/environment.d/10-mobilegl.conf" <<'CONF'
 __GLX_VENDOR_LIBRARY_NAME=mobilegl
 MOBILEGL_TRANSPORT=spawn
