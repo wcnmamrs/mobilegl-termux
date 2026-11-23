@@ -1,7 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ============================================
 #  停止所有服务：XFCE 桌面 + Termux:X11 + MobileGL GPU 服务端
-#  （旧 VirGL 链路的残留进程也一并清掉）
 # ============================================
 
 # 按名字精确杀进程：先看 /proc/<pid>/exe 的基本名，再看 /proc/<pid>/comm。
@@ -47,8 +46,6 @@ killeq termux-x11
 log "3/5 结束 MobileGL GPU 服务端"
 bash "$HOME/mgl/stop-server.sh" 2>/dev/null || true
 killeq libMobileGLServer.so
-# 旧 VirGL 链路残留（已不再使用，清掉免得占内存）
-killeq virgl_test_server_android
 
 # 4. 结束 proot 里的 debian 容器
 log "4/5 停止 debian 容器"

@@ -1,7 +1,7 @@
 #!/bin/bash
 # MobileGL client 环境 —— proot Debian(glibc) 侧 source 这个
 #   . ~/mgl/env.sh          # 连 Termux 侧的常驻 server
-#   . ~/mgl/env.sh stop     # 退出 MobileGL，回到系统 Mesa/virpipe
+#   . ~/mgl/env.sh stop     # 退出 MobileGL，回到系统 Mesa
 # 客户端库目录：安装版在 /opt/mobilegl/lib；开发版在源码树
 if [ -z "${MGL_BUILD:-}" ]; then
     if [ -f /opt/mobilegl/lib/libMobileGL.so ]; then

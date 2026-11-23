@@ -79,8 +79,6 @@ log "清理旧桌面进程..."
 kill_desktop_in_container
 killeq termux-x11
 killeq com.termux.x11
-# 旧 VirGL 链路若还有残留，顺手清掉（新版已不需要它）
-killeq virgl_test_server_android
 sleep 2
 log "清理完成"
 
@@ -182,14 +180,15 @@ sleep 3
 # 可选钩子：给一个可执行文件路径，桌面起来后问你要不要跑它。工具链不建、不改、不猜，
 # 你没设 MGL_AUDIO_HOOK 就完全不出现这一步。
 AUDIO_HOOK="${MGL_AUDIO_HOOK:-}"
-if [ -x "$AUDIO_HOOK" ]; then
+if [ -f "$AUDIO_HOOK" ]; then
     if command -v yad >/dev/null 2>&1; then
         log "音频钩子：$AUDIO_HOOK（${MGL_AUDIO_TIMEOUT:-60} 秒后自动启动）"
         yad --title="音频" --text="现在启动音频？\n$AUDIO_HOOK" \
             --button="跳过:1" --button="启动:0" \
             --timeout="${MGL_AUDIO_TIMEOUT:-60}" --timeout-indicator=bottom >/dev/null 2>&1
+        # yad 的返回码：0=点了启动，70=超时；其余都算"跳过"。
         case $? in
-            0) bash "$AUDIO_HOOK" >/dev/null 2>&1 & log "音频已启动 (PID $!)" ;;
+            0|70) bash "$AUDIO_HOOK" >/dev/null 2>&1 & log "音频已启动 (PID $!)" ;;
             *) log "已跳过音频" ;;
         esac
     else

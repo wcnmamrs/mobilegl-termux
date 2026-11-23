@@ -28,11 +28,11 @@ Android 的 `/dev/mali*`、`/dev/dri/*` 对 `untrusted_app` 域不可读，proot
 
 ## 实测结果（本机：天玑 700 / Mali-G57 MC2 / Android 12 / 无 root）
 
-| 项目 | 软件渲染（llvmpipe / virpipe） | 本项目（Magma + Mali Vulkan） |
+| 项目 | 软件渲染（Mesa llvmpipe） | 本项目（Magma + Mali Vulkan） |
 |---|---|---|
-| `glmark2 -s 800x600` 总分 | 99（virpipe） | **264 ~ 337** |
+| `glmark2 -s 800x600` 总分 | 99 | **264 ~ 337** |
 | glmark2 纹理 / 着色场景 | 115 左右 | **300 ~ 400 FPS** |
-| GL 版本 | 4.3（virpipe，GLES 仿真） | **4.6 core / GLSL 4.60** |
+| GL 版本 | 4.3（GLES 仿真） | **4.6 core / GLSL 4.60** |
 | 呈现路径 | 命令流 → GLES → ANGLE → Vulkan → 回读 | Vulkan → **dma-buf → DRI3+Present 零拷贝** |
 | Chromium WebGL | SwiftShader / llvmpipe | `ANGLE (MobileGL-Dev …, Magma (MobileGL Core) …)` |
 | mpv 视频渲染 | — | `VO: [gpu] 2392x1080 yuv420p`，30 fps 不丢帧 |
@@ -182,7 +182,6 @@ bash ~/mgl/gpu-check.sh 程序名      # 用完整 GPU 环境跑任意程序
 | `mgl-run.sh` | 通用启动器：先 ensure-server，再带着完整环境进容器跑任意命令 |
 | `install-system.sh` | 把库和配置装进容器（`/opt/mobilegl`、glvnd JSON、`/etc/profile.d`、`/etc/mobilegl/client.conf`、`/etc/chromium.d`）；`remove` 卸载 |
 | `gpu-check.sh` | 四段体检；`gpu-check.sh <程序>` 用完整环境跑单个程序 |
-| `switch.sh` | `mobilegl` / `virpipe` / `status` / `ensure` / `desktop` / `bench`（`virpipe` 需要自行 `pkg install virglrenderer-android angle-android`）|
 | `legacy.sh` | 带 GL1.x 兼容层跑老程序 |
 | `xfce.sh` / `xfce-d.sh` | 起 / 停整台桌面（在 `~/mgl/` 里，不在 `$HOME` 放软链）；可选钩子 `MGL_AUDIO_HOOK=<可执行文件>`（不设就没有这一步；有 `yad` 时弹选择框，`MGL_AUDIO_TIMEOUT` 默认 60 秒）|
 

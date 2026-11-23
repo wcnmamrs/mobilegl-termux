@@ -74,4 +74,3 @@ echo "=== 4. 桌面会话继承到的 GL 环境 ====================="
 
 echo
 dim "跑单个程序：~/mgl/gpu-check.sh glmark2 -s 800x600"
-dim "旧链路（VirGL）已卸载；要回退只能 pkg install virglrenderer-android angle-android"

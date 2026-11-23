@@ -1,12 +1,12 @@
 # 给 proot Debian 装真 GPU 加速：MobileGL on Termux（无 root）
 
 > 目标：Android 手机上用 Termux + proot-distro 跑 Debian 桌面／游戏，并且 **GL 真正跑在 Mali GPU 上**，
-> 而不是 Mesa 的 `llvmpipe` 软渲染，也不是 virgl 的四层转译。
+> 而不是 Mesa 的 `llvmpipe` 软渲染。
 >
 > 本文所有命令、参数、坑都来自一台实机：
 > `TFY-AN00 / 天玑 700 (MT6833V) / Mali-G57 MC2 / Android 12 (SDK 31) / arm64 / 8GB / 无 root`。
 > 结果：`OpenGL 4.6.0 MobileGL`，`Magma (MobileGL Core) (Mali-G57 MC2, Vulkan 1.1.177)`，
-> glmark2 800×600 得分 **306**（同机 virgl 是 99）。
+> glmark2 800×600 得分 **306**（同机 Mesa 软渲染是 99）。
 
 > **只是想装上用？** 不需要看这篇——回 [README](../README.md) 跑 `install.sh` 即可（预编译载荷，1–2 分钟）。
 > 本文是**从源码编译**的完整流程：跟上游更新、改补丁、换设备时才用。
@@ -359,7 +359,7 @@ glMultMatrixf/glTranslatef/glRotatef/glScalef/glOrtho/glFrustum/glPushMatrix/glP
 
 ## 11. 性能实测（同机同 X server，1280×1024）
 
-| 场景 | virgl（virpipe+ANGLE） | MobileGL（Magma+DRI3） | 倍数 |
+| 场景 | Mesa 软渲染 | MobileGL（Magma+DRI3） | 倍数 |
 |---|---|---|---|
 | glmark2 Score @800×600 | 99 | **306** | 3.1× |
 | glmark2 build use-vbo=false | 114 | **251** | 2.2× |
@@ -440,7 +440,6 @@ bash ~/xfce-d.sh             # 停桌面/ X / 容器
 ├── env.sh                客户端环境（. env.sh / . env.sh stop）
 ├── mgl-run.sh            Termux 侧一行跑任意 GL 程序：ensure-server + 进 proot + 注入
 ├── legacy.sh             同上，额外注入 libfixfunc.so（GL 1.x 程序）
-├── switch.sh             mobilegl | virpipe | status | bench | ensure | desktop
 ├── xfce-mobilegl.sh      完整桌面链路
 ├── lib/libfixfunc.so     GL 1.x 兼容层
 ├── lib/libnovsync.so     垂直同步旁路
