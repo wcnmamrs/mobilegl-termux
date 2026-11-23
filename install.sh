@@ -26,11 +26,11 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-VERSION="1.0.9"
+VERSION="1.0.10"
 REPO_OWNER="wcnmamrs"
 REPO_NAME="mobilegl-termux"
 PAYLOAD_FILE="mobilegl-payload-arm64-v${VERSION}.tar.xz"
-PAYLOAD_SHA256="d7212195aa4c45efe117acf4bdcc42f119ce5c8fa54eed96f4100728eac585df"
+PAYLOAD_SHA256="50981bdf6b70e0cf941c7cbc0bf4af3c9136ee054d8d083a671d5654f4f4ff84"
 
 MGL_HOME="${MGL_HOME:-$HOME/mgl}"
 DISTRO="${DISTRO_NAME:-}"          # 为空 = 自动探测 / 询问

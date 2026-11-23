@@ -1,3 +1,33 @@
+diff --git a/MobileGL/MG_Backend/BackendRoles.h b/MobileGL/MG_Backend/BackendRoles.h
+index 3478143..d5166e2 100644
+--- a/MobileGL/MG_Backend/BackendRoles.h
++++ b/MobileGL/MG_Backend/BackendRoles.h
+@@ -166,6 +166,14 @@ namespace MobileGL::MG_Backend {
+         }
+         // In the GL stream: EGL_BUFFER_AGE_EXT of the current draw surface (QueryCurrentBufferAge
+         // on the server). False: the backend has no answer (the caller reports 0).
++        // A sync_file for everything the server has submitted so far, so a present that reads the
++        // image can wait for the copy instead of racing it. -1 = no descriptor (the work was
++        // already waited out); false = this backend cannot say (treat as no fence).
++        virtual Bool CreateNativeFence(int* fence) {
++            if (fence != nullptr) *fence = -1;
++            return false;
++        }
++
+         virtual Bool QueryBufferAge(Bool damageRegionFollows, EGLint* age) {
+             (void)damageRegionFollows, (void)age;
+             return false;
+@@ -190,10 +198,6 @@ namespace MobileGL::MG_Backend {
+         // In the GL stream, from eglCreateSync(EGL_SYNC_NATIVE_FENCE_ANDROID) with no descriptor:
+         // ExportNativeFence on the server. `*fence` is the sync_file it handed back (the
+         // caller's to close), or -1 when it had none - the fenced work has then completed.
+-        virtual Bool CreateNativeFence(int* fence) {
+-            *fence = -1;
+-            return false;
+-        }
+         // From eglQuerySurface(EGL_WIDTH/EGL_HEIGHT): a backend whose surface extents
+         // change under the application (a remote server's window) applies what it has received.
+         virtual void RefreshSurfaceExtent(EGLSurface surface) { (void)surface; }
 diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/PipelineFactory.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/PipelineFactory.cpp
 index 7baa54d..0dca8b9 100644
 --- a/MobileGL/MG_Backend/DirectVulkan/Renderer/PipelineFactory.cpp
@@ -87,7 +117,7 @@ index 11209a6..9742f43 100644
          // SHARED-IMAGE SYNCHRONIZATION (WireSharedImage.cpp). The sync_file fences other sessions
          // publish become binary semaphores: a temporary SYNC_FD import is a WAIT, an exportable
 diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRendererPipeline.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRendererPipeline.cpp
-index c523e7d..b45f88d 100644
+index c523e7d..86df066 100644
 --- a/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRendererPipeline.cpp
 +++ b/MobileGL/MG_Backend/DirectVulkan/Renderer/VulkanRendererPipeline.cpp
 @@ -996,6 +996,25 @@ namespace MobileGL::MG_Backend::DirectVulkan {
@@ -116,6 +146,30 @@ index c523e7d..b45f88d 100644
          auto cullFaceEnabled = MG_Pipe::gPipeInputs->IsCapabilityEnabled(CapabilityInput::CullFace);
          auto depthTestEnabled = MG_Pipe::gPipeInputs->IsCapabilityEnabled(CapabilityInput::DepthTest);
          auto polygonOffsetFillEnabled = MG_Pipe::gPipeInputs->IsCapabilityEnabled(CapabilityInput::PolygonOffsetFill) &&
+@@ -1062,12 +1081,18 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+                    t == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY;
+         };
+         if (primitiveRestartEnabled && !m_primitiveTopologyListRestartFeatureEnabled && isListTopology(vkTopology)) {
+-            MGLOG_E_ONCE("Draw skipped: primitive restart on a list topology (0x%x) requires the "
+-                         "primitiveTopologyListRestart device feature (VK_EXT_primitive_topology_list_restart), "
+-                         "which this device does not support; use a strip/fan topology, or disable primitive "
+-                         "restart for list-topology draws.",
++            // The device cannot restart a list topology, and refusing the whole draw is far worse
++            // than losing the restart: ANGLE enables primitive restart for every ESSL3 context, so a
++            // page that never uses a restart sentinel still had every draw declined (a flat canvas,
++            // 53k declines in one session). Clear the bit and keep drawing - a stream that really
++            // does contain the sentinel gets its primitives welded across the gap, which is visible
++            // but survivable, and the loss is logged once.
++            primitiveRestartEnabled = false;
++            MGLOG_W_ONCE("primitive restart on a list topology (0x%x) is ignored: this device lacks "
++                         "VK_EXT_primitive_topology_list_restart. Draws whose index stream contains the "
++                         "restart sentinel render with the primitives either side welded together; "
++                         "strip/fan topologies are unaffected.",
+                          mode);
+-            return VK_NULL_HANDLE;
+         }
+ 
+         if (MG_Util::PipeStats::Enabled()) {
 diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireDraw.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/WireDraw.cpp
 index 69906b2..23f1d8a 100644
 --- a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireDraw.cpp
@@ -196,7 +250,7 @@ index 331228b..ad8e576 100644
          VkImageAspectFlags aspect = format == GL_DEPTH_COMPONENT ? VK_IMAGE_ASPECT_DEPTH_BIT
                                      : format == GL_STENCIL_INDEX ? VK_IMAGE_ASPECT_STENCIL_BIT
 diff --git a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp b/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp
-index e3bf68a..e398fbb 100644
+index e3bf68a..22d419b 100644
 --- a/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp
 +++ b/MobileGL/MG_Backend/DirectVulkan/Renderer/WireSharedImage.cpp
 @@ -65,6 +65,85 @@ namespace MobileGL::MG_Backend::DirectVulkan {
@@ -370,6 +424,22 @@ index e3bf68a..e398fbb 100644
              // An empty region copies nothing: the image already is the frame.
              if (copy && !rows.empty()) {
                  Vector<VkImageCopy> regions;
+@@ -309,6 +450,15 @@ namespace MobileGL::MG_Backend::DirectVulkan {
+             int fence = -1;
+             if (signal != VK_NULL_HANDLE && ExportSharedImageSignal(signal, fence)) {
+                 SI::PublishWrite(*image, fence);
++                // OPT-IN ONLY (MOBILEGL_PRESENT_SYNC=1). Measured on this device: enabling it makes
++                // the scene come out EMPTY (background only, 1 fps) rather than merely slower, so it
++                // stays off until the interaction behind that is understood.
++                if (std::getenv("MOBILEGL_PRESENT_SYNC") != nullptr &&
++                    !WaitForSubmitsUpTo(m_submitCounter, UINT64_MAX)) {
++                    MGLOG_E("Magma: shared image %llu: the copy could not be waited for",
++                            static_cast<unsigned long long>(view.Id));
++                    return false;
++                }
+                 return true;
+             }
+             // Submitted, but no fence came out of it: the copy is waited for, as on a device that
 diff --git a/MobileGL/MG_Impl/EGLImpl/EGLImpl.cpp b/MobileGL/MG_Impl/EGLImpl/EGLImpl.cpp
 index cf45d2c..3b29e45 100644
 --- a/MobileGL/MG_Impl/EGLImpl/EGLImpl.cpp
@@ -1221,11 +1291,15 @@ index f3ccc74..5fd7ab2 100644
  MOBILEGL_GLX_API void glXUseXFont(unsigned long, int, int, int) {
      GLXStreamLock streamLock;
 diff --git a/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp b/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
-index 6684389..9e3a132 100644
+index 6684389..49a45db 100644
 --- a/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
 +++ b/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
-@@ -14,6 +14,8 @@
+@@ -12,8 +12,12 @@
+ #include "../EGLImpl/EGLImpl.h"
+ #include "../EGLImpl/WaylandWindow.h"
  #include "../GetProcAddress.h"
++#include <poll.h>
++#include <cstdlib>
  #include "X11Present.h"
  #include "X11PresentXcb.h"
 +#include "../GLImpl/RenderState/GL_RenderState.h"
@@ -1233,7 +1307,7 @@ index 6684389..9e3a132 100644
  #include <Init.h>
  #include <Config.h>
  #include <MG_Backend/BackendObjects.h>
-@@ -69,6 +71,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -69,6 +73,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
          constexpr int GLX_WIDTH = 0x801D;
          constexpr int GLX_HEIGHT = 0x801E;
          constexpr int GLX_WINDOW_BIT = 0x00000001;
@@ -1244,7 +1318,7 @@ index 6684389..9e3a132 100644
          constexpr int GLX_RGBA_BIT = 0x00000001;
          constexpr int GLX_SAMPLE_BUFFERS = 100000;
          constexpr int GLX_SAMPLES = 100001;
-@@ -87,15 +93,22 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -87,15 +95,22 @@ namespace MobileGL::MG_Impl::GLXImpl {
          constexpr int GLX_CONTEXT_CORE_PROFILE_BIT_ARB = 0x00000001;
          constexpr int GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB = 0x00000002;
          constexpr int GLX_CONTEXT_OPENGL_NO_ERROR_ARB = 0x31B3;
@@ -1270,7 +1344,7 @@ index 6684389..9e3a132 100644
  
          const char* GLXExtensions() {
              return EGLImpl::SharedImagesAvailable() ? kGLXExtensionsWithBufferAge : kGLXExtensions;
-@@ -186,6 +199,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -186,6 +201,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
                                        const Uint8*) = nullptr;
              Uint32 (*MaximumRequestLength)(void*) = nullptr;
              int (*Flush)(void*) = nullptr;
@@ -1278,7 +1352,7 @@ index 6684389..9e3a132 100644
  
              Bool Valid() const {
                  return GetXCBConnection && GenerateId && CreateGC && FreeGC && PutImage && MaximumRequestLength &&
-@@ -208,6 +222,8 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -208,6 +224,8 @@ namespace MobileGL::MG_Impl::GLXImpl {
                      fns->MaximumRequestLength = reinterpret_cast<decltype(fns->MaximumRequestLength)>(
                          dlsym(xcb, "xcb_get_maximum_request_length"));
                      fns->Flush = reinterpret_cast<decltype(fns->Flush)>(dlsym(xcb, "xcb_flush"));
@@ -1287,7 +1361,7 @@ index 6684389..9e3a132 100644
                  }
                  if (!fns->Valid()) {
                      MGLOG_E_ONCE("glx: libX11-xcb/libxcb entry points missing; remote windows are not shown");
-@@ -219,24 +235,91 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -219,24 +237,91 @@ namespace MobileGL::MG_Impl::GLXImpl {
  
          constexpr Uint8 kXcbImageFormatZPixmap = 2;
  
@@ -1389,7 +1463,26 @@ index 6684389..9e3a132 100644
              ::Display* XDisplay = nullptr;
              EGLDisplay Display = EGL_NO_DISPLAY;
              EGLConfig Config = nullptr;
-@@ -372,8 +455,47 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -262,6 +347,18 @@ namespace MobileGL::MG_Impl::GLXImpl {
+                 out->Modifier = image.Modifier;
+                 return true;
+             }
++            Bool WaitForCopy() override {
++                auto* client = MG_Backend::ClientHooksOf(MG_Backend::pActiveBackendObject.get());
++                if (client == nullptr) return true;
++                int fence = -1;
++                if (!client->CreateNativeFence(&fence)) return true; // the server waited it out itself
++                if (fence < 0) return true;
++                struct pollfd wait {fence, POLLIN, 0};
++                const int ready = ::poll(&wait, 1, 2000);
++                ::close(fence);
++                return ready > 0;
++            }
++
+             void Release(Uint64 id) override {
+                 if (auto* client = MG_Backend::ClientHooksOf(MG_Backend::pActiveBackendObject.get()))
+                     (void)client->ReleaseSharedImage(id);
+@@ -372,8 +469,47 @@ namespace MobileGL::MG_Impl::GLXImpl {
              return it == contexts.end() ? nullptr : &it->second;
          }
  
@@ -1437,7 +1530,19 @@ index 6684389..9e3a132 100644
              const auto& x11 = X11();
              if (!x11.Valid() || !dpy || drawable == 0) {
                  return false;
-@@ -502,10 +624,25 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -408,7 +544,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         void ChoosePresentPath(GLXDrawableHandle drawable, DrawableSurface& surface, void* connection) {
+             surface.PathChosen = true;
+             X11Present::ConnectionCaps caps = X11Present::QueryConnectionCaps(connection);
+-            caps.SharedImages = EGLImpl::SharedImagesAvailable();
++            // The shared image is the live dma-buf and PresentPixmap carries no fence, so a server that
++    // composites while our copy is in flight tears; zero-copy is still the default because the
++    // readback alternative costs 20-30x the frame time and mis-encodes brightness here.
++    caps.SharedImages = EGLImpl::SharedImagesAvailable();
+             const char* override = std::getenv("MOBILEGL_GLX_PRESENT");
+             surface.Path = X11Present::SelectPath(caps, surface.Depth, override);
+             if (surface.Path == X11Present::Path::Dri3Present) {
+@@ -502,10 +641,25 @@ namespace MobileGL::MG_Impl::GLXImpl {
              const EGLint bandRows = std::max<EGLint>(1, static_cast<EGLint>(budget / rowBytes));
              for (EGLint y = 0; y < height; y += bandRows) {
                  const EGLint rows = std::min(bandRows, height - y);
@@ -1467,7 +1572,7 @@ index 6684389..9e3a132 100644
              }
              (void)xcb.Flush(connection);
          }
-@@ -527,6 +664,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -527,6 +681,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
          // (same contract as the WGL and CGL layers). Polling XGetGeometry is a
          // server round trip, so throttle steady-state swaps.
          void SyncSurfaceSize(Display* dpy, GLXDrawableHandle drawable, DrawableSurface& surface, Bool force = false) {
@@ -1478,7 +1583,7 @@ index 6684389..9e3a132 100644
              const auto now = std::chrono::steady_clock::now();
              if (!force && now - surface.LastSizePoll < std::chrono::milliseconds(250)) {
                  return;
-@@ -597,14 +738,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -597,14 +755,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
          }
  
          GLXContextHandle CreateContextFromEGLAttribs(Display* dpy, const FBConfigInfo* fbconfig, GLXContextHandle share,
@@ -1495,7 +1600,7 @@ index 6684389..9e3a132 100644
  
              EGLContext shareContext = EGL_NO_CONTEXT;
              if (share) {
-@@ -631,7 +772,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -631,7 +789,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  EGL_SURFACE_TYPE,
                  EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
                  EGL_RENDERABLE_TYPE,
@@ -1504,7 +1609,7 @@ index 6684389..9e3a132 100644
                  EGL_NONE,
              };
              EGLConfig config = nullptr;
-@@ -648,6 +789,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -648,6 +806,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
              }
  
              ContextObject object;
@@ -1512,7 +1617,7 @@ index 6684389..9e3a132 100644
              object.XDisplay = dpy;
              object.Display = display;
              object.Config = config;
-@@ -702,7 +844,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -702,7 +861,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  *value = GLX_RGBA_BIT;
                  return 0;
              case GLX_DRAWABLE_TYPE:
@@ -1524,7 +1629,7 @@ index 6684389..9e3a132 100644
                  return 0;
              case GLX_X_RENDERABLE:
                  *value = 1;
-@@ -722,7 +867,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -722,7 +884,10 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  *value = 0;
                  return 0;
              case GLX_VISUAL_ID: {
@@ -1536,7 +1641,7 @@ index 6684389..9e3a132 100644
                  if (x11.Valid() && dpy) {
                      const int screen = x11.GetDefaultScreen(dpy);
                      void* visual = x11.GetDefaultVisual(dpy, screen);
-@@ -831,27 +979,31 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -831,27 +996,31 @@ namespace MobileGL::MG_Impl::GLXImpl {
          return GetClientString(dpy, name);
      }
  
@@ -1576,7 +1681,7 @@ index 6684389..9e3a132 100644
          if (attribList) {
              for (SizeT i = 0; attribList[i] != 0; i += 2) {
                  const int attrib = attribList[i];
-@@ -861,16 +1013,16 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -861,16 +1030,16 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  }
                  switch (attrib) {
                  case GLX_STENCIL_SIZE:
@@ -1599,7 +1704,7 @@ index 6684389..9e3a132 100644
                          }
                      }
                      break;
-@@ -879,22 +1031,30 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -879,22 +1048,30 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  case GLX_BLUE_SIZE:
                  case GLX_ALPHA_SIZE:
                      if (value > 8) {
@@ -1634,7 +1739,7 @@ index 6684389..9e3a132 100644
                      }
                      break;
                  case GLX_STEREO:
-@@ -907,17 +1067,28 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -907,17 +1084,28 @@ namespace MobileGL::MG_Impl::GLXImpl {
                  case GLX_ACCUM_BLUE_SIZE:
                  case GLX_ACCUM_ALPHA_SIZE:
                      if (value > 0) {
@@ -1667,7 +1772,7 @@ index 6684389..9e3a132 100644
                      }
                      break;
                  default:
-@@ -929,8 +1100,8 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -929,8 +1117,8 @@ namespace MobileGL::MG_Impl::GLXImpl {
          }
  
          int count = 0;
@@ -1678,7 +1783,7 @@ index 6684389..9e3a132 100644
                  ++count;
              }
          }
-@@ -948,9 +1119,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -948,9 +1136,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
              return nullptr;
          }
          int out = 0;
@@ -1691,7 +1796,7 @@ index 6684389..9e3a132 100644
              }
          }
          if (nelements) {
-@@ -962,17 +1133,33 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -962,17 +1150,33 @@ namespace MobileGL::MG_Impl::GLXImpl {
      }
  
      int GetFBConfigAttrib(Display* dpy, GLXFBConfigHandle config, int attribute, int* value) {
@@ -1729,7 +1834,7 @@ index 6684389..9e3a132 100644
          return ResolveVisual(dpy, -1);
      }
  
-@@ -1057,14 +1244,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1057,14 +1261,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
              EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
              EGL_NONE,
          };
@@ -1747,7 +1852,7 @@ index 6684389..9e3a132 100644
              return nullptr;
          }
          const EGLint attribs[] = {
-@@ -1076,14 +1263,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1076,14 +1280,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
              EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
              EGL_NONE,
          };
@@ -1765,7 +1870,7 @@ index 6684389..9e3a132 100644
              return nullptr;
          }
  
-@@ -1118,11 +1305,40 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1118,11 +1322,40 @@ namespace MobileGL::MG_Impl::GLXImpl {
              }
          }
  
@@ -1808,7 +1913,7 @@ index 6684389..9e3a132 100644
          Vector<EGLint> attribs = {
              EGL_CONTEXT_MAJOR_VERSION,
              major,
-@@ -1145,7 +1361,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1145,7 +1378,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
          }
          attribs.push_back(EGL_NONE);
  
@@ -1817,7 +1922,7 @@ index 6684389..9e3a132 100644
      }
  
      void DestroyContext(Display*, GLXContextHandle context) {
-@@ -1199,6 +1415,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1199,6 +1432,14 @@ namespace MobileGL::MG_Impl::GLXImpl {
              return 0;
          }
          t_current = {dpy, drawable, drawable, context};
@@ -1832,7 +1937,7 @@ index 6684389..9e3a132 100644
          return 1;
      }
  
-@@ -1225,7 +1449,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1225,7 +1466,9 @@ namespace MobileGL::MG_Impl::GLXImpl {
          }
          // What the window shows is the frame the swap finishes, read back while it is still the
          // drawable's content (only from the thread it is current to: the readback is a GL call).
@@ -1843,7 +1948,7 @@ index 6684389..9e3a132 100644
              PresentRemoteDrawable(drawable, it->second);
          }
          EGLImpl::SwapBuffers(it->second.Display, it->second.Surface);
-@@ -1240,14 +1466,66 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1240,14 +1483,66 @@ namespace MobileGL::MG_Impl::GLXImpl {
          SyncSurfaceSize(dpy, drawable, it->second, configured);
      }
  
@@ -1913,7 +2018,7 @@ index 6684389..9e3a132 100644
          // The GLXWindow is the X window itself; the EGL surface is created
          // lazily on the first MakeCurrent (same pattern as WGL's HWND cache).
          return window;
-@@ -1396,6 +1674,157 @@ namespace MobileGL::MG_Impl::GLXImpl {
+@@ -1396,6 +1691,208 @@ namespace MobileGL::MG_Impl::GLXImpl {
          SwapIntervalEXT(nullptr, 0, interval);
          return 0;
      }
@@ -1932,6 +2037,16 @@ index 6684389..9e3a132 100644
 +                void* (*OpenDisplay)(const char*) = nullptr;
 +                int (*GetGeometry)(void*, Uint64, Uint64*, int*, int*, unsigned int*, unsigned int*,
 +                                   unsigned int*, unsigned int*) = nullptr;
++                // A compositing window manager composites from its own copy of the window and only
++                // refreshes it when the window reports damage. DRI3 present rewrites the window's
++                // pixels without touching that bookkeeping, so without this the compositor keeps
++                // alternating between its stale copy and the frame we just presented - which is what
++                // "models appear and disappear" looks like. XDamage is the standard way to say it.
++                int (*DamageCreate)(void*, unsigned long, int) = nullptr;
++                void (*DamageAdd)(void*, unsigned long, unsigned long) = nullptr;
++                unsigned long (*CreateRegionFromWindow)(void*, unsigned long, int) = nullptr;
++                void (*DestroyRegion)(void*, unsigned long) = nullptr;
++                Bool DamageResolved = false;
 +                Bool Resolved = false;
 +            };
 +
@@ -1944,6 +2059,21 @@ index 6684389..9e3a132 100644
 +                        resolved.GetGeometry = reinterpret_cast<decltype(resolved.GetGeometry)>(
 +                            dlsym(handle, "XGetGeometry"));
 +                    }
++                    if (void* damage = dlopen("libXdamage.so.1", RTLD_LAZY | RTLD_LOCAL)) {
++                        resolved.DamageCreate =
++                            reinterpret_cast<decltype(resolved.DamageCreate)>(dlsym(damage, "XDamageCreate"));
++                        resolved.DamageAdd =
++                            reinterpret_cast<decltype(resolved.DamageAdd)>(dlsym(damage, "XDamageAdd"));
++                    }
++                    if (void* fixes = dlopen("libXfixes.so.3", RTLD_LAZY | RTLD_LOCAL)) {
++                        resolved.CreateRegionFromWindow = reinterpret_cast<decltype(resolved.CreateRegionFromWindow)>(
++                            dlsym(fixes, "XFixesCreateRegionFromWindow"));
++                        resolved.DestroyRegion =
++                            reinterpret_cast<decltype(resolved.DestroyRegion)>(dlsym(fixes, "XFixesDestroyRegion"));
++                    }
++                    resolved.DamageResolved = resolved.DamageCreate != nullptr && resolved.DamageAdd != nullptr &&
++                                              resolved.CreateRegionFromWindow != nullptr &&
++                                              resolved.DestroyRegion != nullptr;
 +                    return resolved;
 +                }();
 +                return api;
@@ -1955,6 +2085,11 @@ index 6684389..9e3a132 100644
 +            }
 +
 +            // The X window each attached surface presents into (the surface key alone cannot say).
++            UnorderedMap<Uint64, Uint64>& WindowDamages() {
++                static UnorderedMap<Uint64, Uint64> damages;
++                return damages;
++            }
++
 +            UnorderedMap<Uint64, Uint64>& EglWindowIds() {
 +                static UnorderedMap<Uint64, Uint64> windows;
 +                return windows;
@@ -2021,6 +2156,26 @@ index 6684389..9e3a132 100644
 +            return true;
 +        }
 +
++        void DeclareWindowDamage(void* xDisplay, Uint64 window) {
++            auto& api = GeometryApi();
++            if (!api.DamageResolved || xDisplay == nullptr || window == 0) return;
++            auto& damages = WindowDamages();
++            auto it = damages.find(window);
++            if (it == damages.end()) {
++                const int damage = api.DamageCreate(xDisplay, static_cast<unsigned long>(window), 1 /*NonEmpty*/);
++                it = damages.emplace(window, static_cast<Uint64>(damage < 0 ? 0 : damage)).first;
++                if (it->second == 0) {
++                    MGLOG_W_ONCE("egl: XDamageCreate failed for 0x%llx; a compositing window manager may show stale frames",
++                                 static_cast<unsigned long long>(window));
++                    return;
++                }
++            }
++            const unsigned long region = api.CreateRegionFromWindow(xDisplay, static_cast<unsigned long>(window), 0);
++            if (region == 0) return;
++            api.DamageAdd(xDisplay, static_cast<unsigned long>(window), region);
++            api.DestroyRegion(xDisplay, region);
++        }
++
 +        Bool Present(EGLDisplay dpy, EGLSurface surface) {
 +            if (surface == EGL_NO_SURFACE) return false;
 +            const std::lock_guard<std::recursive_mutex> lock(RegistryMutex());
@@ -2058,6 +2213,7 @@ index 6684389..9e3a132 100644
 +                ChoosePresentPath(window, entry, connection);
 +            }
 +            PresentRemoteDrawable(window, entry);
++            DeclareWindowDamage(entry.XDisplay, static_cast<Uint64>(window));
 +            return true;
 +        }
 +
@@ -2085,6 +2241,135 @@ index 5675880..226048c 100644
      GLXDrawableHandle CreateWindow(Display* dpy, GLXFBConfigHandle config, GLXDrawableHandle window,
                                     const int* attribList);
      void DestroyWindow(Display* dpy, GLXDrawableHandle window);
+diff --git a/MobileGL/MG_Impl/GLXImpl/X11Present.cpp b/MobileGL/MG_Impl/GLXImpl/X11Present.cpp
+index 09e6d91..3efd73b 100644
+--- a/MobileGL/MG_Impl/GLXImpl/X11Present.cpp
++++ b/MobileGL/MG_Impl/GLXImpl/X11Present.cpp
+@@ -6,6 +6,7 @@
+ // SPDX-License-Identifier: LGPL-3.0-only
+ // End of Source File Header
+ 
++#include <cstdlib>
+ #include "X11Present.h"
+ 
+ #include <cstring>
+@@ -133,6 +134,8 @@ namespace MobileGL::MG_Impl::GLXImpl::X11Present {
+         }
+         buffer.Storage = image;
+         buffer.Pixmap = pixmap;
++        MGLOG_I("present-audit: buffer created image=%u pixmap=0x%lx %dx%d", image.Id, pixmap, (int)image.Width,
++                (int)image.Height);
+         buffer.Busy = false;
+         buffer.Serial = 0;
+         m_damage.Invalidate(static_cast<SizeT>(&buffer - m_buffers));
+@@ -195,6 +198,16 @@ namespace MobileGL::MG_Impl::GLXImpl::X11Present {
+         for (;;) {
+             if (m_broken) return nullptr;
+             // The free buffer presented longest ago, so the images take turns.
++            // Grow the ring to kBuffers before reusing anything. With a single image the frame we
++            // present is the same memory the application draws the next frame into, so the copy the
++            // server makes at vblank can land in the middle of that draw - which is the picture with
++            // some models and not others. Taking a fresh slot first keeps "being drawn" and
++            // "being presented" in different images.
++            if (AllocatedBuffers() < kBuffers) {
++                for (Buffer& buffer : m_buffers) {
++                    if (buffer.Pixmap == 0 && Allocate(buffer)) return &buffer;
++                }
++            }
+             Buffer* best = nullptr;
+             for (Buffer& buffer : m_buffers) {
+                 if (buffer.Pixmap == 0 || buffer.Busy) continue;
+@@ -241,29 +254,45 @@ namespace MobileGL::MG_Impl::GLXImpl::X11Present {
+         Buffer* buffer = NextFree();
+         if (buffer == nullptr) return false;
+         const SizeT index = static_cast<SizeT>(buffer - m_buffers);
+-        const MG_Util::Damage::Region copy = m_damage.TakeForWrite(index, damage, m_width, m_height);
++        // Copy the whole frame, not just the damage. Every buffer in the ring is shown in turn, so a
++        // region that one buffer happens to hold and another does not becomes a model that appears
++        // and disappears as the images rotate. Per-buffer damage tracking is only safe while the
++        // tracking is exact; until it is, a full copy keeps the images identical.
++        MG_Util::Damage::Region copy = m_damage.TakeForWrite(index, damage, m_width, m_height);
++        if (std::getenv("MOBILEGL_PRESENT_PARTIAL") == nullptr) copy = MG_Util::Damage::Region::Full();
+         if (!m_images.CopyFrame(buffer->Storage.Id, copy)) {
+             Break("the frame could not be copied into a shared image");
+             return false;
+         }
+ 
+-        const Uint32 serial = ++m_serial;
+-        const Uint32 options = swapInterval > 0 ? 0u : kPresentOptionAsync;
+-        const Uint64 targetMsc = swapInterval > 0 && m_lastMsc != 0 ? m_lastMsc + static_cast<Uint64>(swapInterval) : 0;
+         MG_Util::Damage::Region update = MG_Util::Damage::Region::Full();
+         if (!damage.IsFull()) update = damage.FlippedY(m_height);
++
++        // kPresentOptionCopy makes the server own a copy of the pixmap, so the buffer is safe to
++        // reuse as soon as the request is in - no fence, no one-frame delay, and no torn frames.
++        // Async keeps the pacing at the client's refresh instead of forcing every present onto the
++        // next vblank, which is what pinned the window at half the refresh rate.
++        const Uint32 serial = ++m_serial;
++        const Uint32 options = kPresentOptionCopy | (swapInterval > 0 ? 0u : kPresentOptionAsync);
++        const Uint64 targetMsc = swapInterval > 0 && m_lastMsc != 0 ? m_lastMsc + static_cast<Uint64>(swapInterval) : 0;
+         if (!m_connection.PresentPixmap(buffer->Pixmap, serial, options, targetMsc, update)) {
+             Break("PresentPixmap could not be sent");
+             return false;
+         }
+-        buffer->Busy = true;
+         buffer->Serial = serial;
++        buffer->Busy = true;
+         if (m_throttle.WantsFrameRequest()) {
+             m_throttle.Requested(m_nowMs());
+             m_awaitedSerial = serial;
+         }
+         m_connection.Flush();
++        m_ready = nullptr;
+         ++m_framesPresented;
++        if (m_framesPresented <= 40) {
++            MGLOG_I("present-audit: #%u buffer=%zu image=%u pixmap=0x%lx options=0x%x copy=%s w=%d h=%d", m_framesPresented,
++                    index, buffer->Storage.Id, buffer->Pixmap, options,
++                    std::getenv("MOBILEGL_PRESENT_PARTIAL") == nullptr ? "full" : "damage", (int)m_width, (int)m_height);
++        }
+         return true;
+     }
+ 
+diff --git a/MobileGL/MG_Impl/GLXImpl/X11Present.h b/MobileGL/MG_Impl/GLXImpl/X11Present.h
+index fabd939..8955447 100644
+--- a/MobileGL/MG_Impl/GLXImpl/X11Present.h
++++ b/MobileGL/MG_Impl/GLXImpl/X11Present.h
+@@ -46,6 +46,10 @@ namespace MobileGL::MG_Impl::GLXImpl::X11Present {
+     inline constexpr Uint32 kFourccArgb8888 = 0x34325241u; // 'AR24'
+     // Present option bits (presentproto).
+     inline constexpr Uint32 kPresentOptionAsync = 1u;
++    // PresentOptionCopy: the server copies the pixmap instead of referencing it, so we may
++    // reuse the pixmap the moment the request is processed. Without it the server keeps
++    // reading our pixmap until it has been displayed, and any reuse shows up as torn frames.
++    inline constexpr Uint32 kPresentOptionCopy = 2u;
+ 
+     // ---- which path a window's frames take -------------------------------------------------------
+ 
+@@ -95,6 +99,11 @@ namespace MobileGL::MG_Impl::GLXImpl::X11Present {
+         // The current frame into the image, top row first; `region` in GL window coordinates (Full
+         // = all). True once the copy is submitted and its fence published.
+         virtual Bool CopyFrame(Uint64 id, const MG_Util::Damage::Region& region) = 0;
++
++        // Blocks until the copy CopyFrame submitted has actually reached the image. An X server
++        // presents the pixmap the moment the client asks and never waits on the writer's fence,
++        // so presenting before this returns composites a half-written buffer (flicker).
++        virtual Bool WaitForCopy() { return true; }
+     };
+ 
+     struct Event {
+@@ -192,6 +201,12 @@ namespace MobileGL::MG_Impl::GLXImpl::X11Present {
+         Int32 m_width = 0;
+         Int32 m_height = 0;
+         std::function<Int64()> m_nowMs;
++        // Present the buffer whose copy went out LAST frame. The X server hands out IdleNotify for a
++        // pixmap as soon as the copy is queued, not when it lands, so a frame copied and presented in
++        // the same breath is read while the blit is still filling it - that is the sky-only frame
++        // users see. One frame of latency lets the copy finish before anyone reads it.
++        Buffer* m_ready = nullptr;
++        MG_Util::Damage::Region m_readyUpdate = MG_Util::Damage::Region::Full();
+         Buffer m_buffers[kMaxBuffers];
+         MG_Util::Damage::BufferDamageTracker m_damage{kMaxBuffers};
+         EGLImpl::Wayland::FrameThrottle m_throttle;
 diff --git a/MobileGL/MG_Impl/GLXImpl/X11PresentXcb.cpp b/MobileGL/MG_Impl/GLXImpl/X11PresentXcb.cpp
 index 837d654..6e0c7c7 100644
 --- a/MobileGL/MG_Impl/GLXImpl/X11PresentXcb.cpp
@@ -2283,6 +2568,23 @@ index 7474f89..7f82333 100644
                  if (point.HasExplicitRange()) {
                      const auto range = point.GetRange();
                      entry.Offset = static_cast<Uint64>(range.start);
+diff --git a/MobileGL/MG_Remote/Client/BackendObject_Remote.h b/MobileGL/MG_Remote/Client/BackendObject_Remote.h
+index c5b4d54..f4b575d 100644
+--- a/MobileGL/MG_Remote/Client/BackendObject_Remote.h
++++ b/MobileGL/MG_Remote/Client/BackendObject_Remote.h
+@@ -65,11 +65,11 @@ namespace MobileGL::MG_Remote::Client {
+                                      const MG_Backend::SharedImageImportLayout& layout, Uint64* outId) override;
+         Bool ReleaseSharedImage(Uint64 id) override;
+         Bool PresentToSharedImage(Uint64 id, const MG_Util::Damage::Region& region) override;
++        Bool CreateNativeFence(int* fence) override;
+         Bool QueryBufferAge(Bool damageRegionFollows, EGLint* age) override;
+         Bool SetDamageRegion(const MG_Util::Damage::Region& region) override;
+         Bool AttachSharedImageToTexture(Uint64 textureLifetimeId, Uint64 id) override;
+         Bool FlushSharedImageAccesses() override;
+-        Bool CreateNativeFence(int* fence) override;
+ 
+         // Copies the caps mirror's FormatCapabilityCache into the base class's
+         // m_formatCapabilities. Public because CapsMirror's adoption hook is a free function
 diff --git a/MobileGL/MG_Remote/Server/SharedImageRegistry.cpp b/MobileGL/MG_Remote/Server/SharedImageRegistry.cpp
 index 5ae42c2..1ed1692 100644
 --- a/MobileGL/MG_Remote/Server/SharedImageRegistry.cpp
